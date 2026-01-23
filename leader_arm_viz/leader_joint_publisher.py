@@ -4,10 +4,11 @@ import ast
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-import lerobot_teleoperator_violin as violin_mod
-from lerobot.teleoperators.config import TeleoperatorConfig
+# import lerobot_teleoperator_violin as violin_mod
+# from lerobot.teleoperators.config import TeleoperatorConfig
 import numpy as np
 import math
+
 
 leader_limits = {
     "joint1": (-100.0, 100.0),
@@ -18,6 +19,11 @@ leader_limits = {
     "joint6": (-98.0, 100.0),
     "joint7_left": (0.0, 100.0),
 }
+
+JOINT146_POS2RAD_SCALAR = 0.0227
+JOINT235_POS2RAD_SCALAR = 0.0157
+JOINT7_POS2RAD_SCALAR = 0.00025
+JOINT7_POS2RAD_OFFSET = 0.025
 
 class LeaderJointPublisher(Node):
     def __init__(self):
@@ -46,23 +52,23 @@ class LeaderJointPublisher(Node):
         self._leader_connected = False
         self._warned_no_leader = False
 
-        cfg_cls = None
-        for obj in vars(violin_mod).values():
-            if isinstance(obj, type) and issubclass(obj, TeleoperatorConfig) and obj is not TeleoperatorConfig:
-                cfg_cls = obj
-                break
-        assert cfg_cls is not None, "Could not find a TeleoperatorConfig in lerobot_teleoperator_violin"
+        # cfg_cls = None
+        # for obj in vars(violin_mod).values():
+        #     if isinstance(obj, type) and issubclass(obj, TeleoperatorConfig) and obj is not TeleoperatorConfig:
+        #         cfg_cls = obj
+        #         break
+        # assert cfg_cls is not None, "Could not find a TeleoperatorConfig in lerobot_teleoperator_violin"
         
-        cfg = cfg_cls(port="/dev/ttyUSB1", id="my_awesome_staraiviolin_arm")
-        teleop = cfg_cls.__name__.removesuffix("Config")
-        teleop_cls = getattr(violin_mod, teleop)
-        self.leader = teleop_cls(cfg)
-        try:
-            self.leader.connect()
-            self._leader_connected = True
-            print("[INFO] Leader arm connected successfully.", flush=True)
-        except Exception as exc:
-            print(f"[WARN] Leader arm not connected; publishing zeros. Error: {exc}", flush=True)
+        # cfg = cfg_cls(port="/dev/ttyUSB1", id="my_awesome_staraiviolin_arm")
+        # teleop = cfg_cls.__name__.removesuffix("Config")
+        # teleop_cls = getattr(violin_mod, teleop)
+        # self.leader = teleop_cls(cfg)
+        # try:
+        #     self.leader.connect()
+        #     self._leader_connected = True
+        #     print("[INFO] Leader arm connected successfully.", flush=True)
+        # except Exception as exc:
+        #     print(f"[WARN] Leader arm not connected; publishing zeros. Error: {exc}", flush=True)
 
     def _read_leader_joint_positions(self) -> list[float]:
         """
@@ -75,7 +81,7 @@ class LeaderJointPublisher(Node):
                     "Leader arm disconnected; continuing to publish zero joint positions."
                 )
                 self._warned_no_leader = True
-            return [0.0] * len(self.leader_joint_names)
+            return [0.0, 0.157, 0.0628, 0.0, 1.413, -1.2939, -0.025]  # home position in radians
 
         observe = self.leader.get_action()
         keys = sorted(observe.keys())
@@ -86,6 +92,17 @@ class LeaderJointPublisher(Node):
             v = np.array(v).reshape(-1)[0]
             joint_vals.append(float(v))
         return joint_vals
+
+    def position_to_radian(self, positions) -> float:
+        radians = []
+        for i in range(len(positions)):
+            if i == 0 or i == 3 or i == 5:
+                radians.append(positions[i] * JOINT146_POS2RAD_SCALAR)
+            elif i == 1 or i == 2 or i == 4:
+                radians.append(positions[i] * JOINT235_POS2RAD_SCALAR)
+            elif i == 6:
+                radians.append((positions[i] * JOINT7_POS2RAD_SCALAR) - JOINT7_POS2RAD_OFFSET)
+        return radians
 
     def _coerce_joint_names(self, value) -> list[str]:
         if isinstance(value, list):
