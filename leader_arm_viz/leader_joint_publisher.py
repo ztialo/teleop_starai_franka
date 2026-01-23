@@ -131,7 +131,7 @@ class LeaderJointPublisher(Node):
         # Consider we are locking the 3rd joint!!!! 
         # reusing the sample joint position values to control franka arm for now
         msg.name = self.franka_joint_names
-        msg.position = position_list
+        msg.position = self.position_to_radian(position_list)
         self.franka_pub.publish(msg)
 
 
