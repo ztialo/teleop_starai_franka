@@ -4,8 +4,7 @@ import ast
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from lerobot.robots.myrobot import MyRobot
-import lerobot_telleoperator_violin as violin_mod
+import lerobot_teleoperator_violin as violin_mod
 from lerobot.teleoperators.config import TeleoperatorConfig
 import numpy as np
 
