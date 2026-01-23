@@ -1,3 +1,4 @@
+from pathlib import Path
 from setuptools import setup
 
 package_name = "leader_arm_viz"
@@ -11,6 +12,14 @@ setup(
         (f"share/{package_name}", ["package.xml"]),
         (f"share/{package_name}/launch", ["launch/leader_arm_rviz.launch.py"]),
         (f"share/{package_name}/urdf", ["urdf/fr3.urdf", "urdf/cello_description.urdf"]),
+        (
+            f"share/{package_name}/meshes",
+            [str(p) for p in Path("meshes").rglob("*") if p.is_file()],
+        ),
+        (
+            f"share/{package_name}/rviz",
+            [str(p) for p in Path("rviz").rglob("*") if p.is_file()],
+        ),
     ],
     install_requires=["setuptools"],
     zip_safe=True,

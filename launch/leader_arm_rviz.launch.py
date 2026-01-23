@@ -26,6 +26,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             DeclareLaunchArgument("use_rviz", default_value="true"),
+            DeclareLaunchArgument("rviz_config", default_value=str(pkg_share / "rviz" / "view.rviz")),
             DeclareLaunchArgument("publish_rate_hz", default_value="100.0"),
             DeclareLaunchArgument("frame_id", default_value="world"),
             DeclareLaunchArgument(
@@ -41,13 +42,15 @@ def generate_launch_description() -> LaunchDescription:
                 executable="robot_state_publisher",
                 name="leader_state_publisher",
                 parameters=[{"robot_description": _read_text(pkg_share / "urdf" / "cello_description.urdf")}],
+                remappings=[("/joint_states", "/leader/joint_states")],
             ),
-            Node(
-                package="robot_state_publisher",
-                executable="robot_state_publisher",
-                name="franka_state_publisher",
-                parameters=[{"robot_description": _read_text(pkg_share / "urdf" / "fr3.urdf")}],
-            ),
+            # Node(
+            #     package="robot_state_publisher",
+            #     executable="robot_state_publisher",
+            #     name="franka_state_publisher",
+            #     parameters=[{"robot_description": _read_text(pkg_share / "urdf" / "fr3.urdf")}],
+            #     remappings=[("/joint_states", "/joint_command_fr3")],
+            # ),
             Node(
                 package="leader_arm_viz",
                 executable="leader_joint_publisher",
@@ -68,12 +71,13 @@ def generate_launch_description() -> LaunchDescription:
                 name="rviz2",
                 condition=IfCondition(use_rviz),
                 output="screen",
+                arguments=["-d", LaunchConfiguration("rviz_config")],
             ),
             Node(
                 package="tf2_ros",
                 executable="static_transform_publisher",
                 name="world_to_leader_frame",
-                arguments=["5", "0", "0", "0", "0", "0", "world", "leader_frame"],
+                arguments=["1", "0", "0", "0", "0", "0", "world", "leader_frame"],
             ),
             Node(
                 package="tf2_ros",

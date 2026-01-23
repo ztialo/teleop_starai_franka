@@ -7,6 +7,17 @@ from sensor_msgs.msg import JointState
 import lerobot_teleoperator_violin as violin_mod
 from lerobot.teleoperators.config import TeleoperatorConfig
 import numpy as np
+import math
+
+leader_limits = {
+    "joint1": (-100.0, 100.0),
+    "joint2": (-84.0, 100.0),
+    "joint3": (-100.0, 100.0),
+    "joint4": (-100.0, 100.0),
+    "joint5": (-100.0, 100.0),
+    "joint6": (-98.0, 100.0),
+    "joint7_left": (0.0, 100.0),
+}
 
 class LeaderJointPublisher(Node):
     def __init__(self):
@@ -28,20 +39,20 @@ class LeaderJointPublisher(Node):
 
         # queue depth of 10
         self.leader_pub = self.create_publisher(JointState, "/leader/joint_states", 10)
-        self.franka_pub = self.create_publisher(JointState, "/franka/joint_states", 10)
+        self.franka_pub = self.create_publisher(JointState, "/joint_command_fr3", 10)
 
         period = 1.0 / max(self.publish_rate_hz, 1e-6)
         self.timer = self.create_timer(period, self._on_timer)
         self._leader_connected = False
         self._warned_no_leader = False
-        
+
         cfg_cls = None
         for obj in vars(violin_mod).values():
             if isinstance(obj, type) and issubclass(obj, TeleoperatorConfig) and obj is not TeleoperatorConfig:
                 cfg_cls = obj
                 break
         assert cfg_cls is not None, "Could not find a TeleoperatorConfig in lerobot_teleoperator_violin"
-
+        
         cfg = cfg_cls(port="/dev/ttyUSB1", id="my_awesome_staraiviolin_arm")
         teleop = cfg_cls.__name__.removesuffix("Config")
         teleop_cls = getattr(violin_mod, teleop)
@@ -53,8 +64,6 @@ class LeaderJointPublisher(Node):
         except Exception as exc:
             print(f"[WARN] Leader arm not connected; publishing zeros. Error: {exc}", flush=True)
 
-
-        
     def _read_leader_joint_positions(self) -> list[float]:
         """
         Return joint positions in radians, same order as self.joint_names.
