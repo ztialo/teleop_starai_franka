@@ -13,7 +13,7 @@ class LeaderJointPublisher(Node):
         super().__init__("leader_joint_publisher")
 
         self.declare_parameter("publish_rate_hz", 100.0)
-        self.declare_parameter("leader_joint_names", )
+        self.declare_parameter("leader_joint_names", ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7_left",])
         self.declare_parameter("franka_joint_names", ["fr3_joint1", "fr3_joint2", "fr3_joint3", "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7",])   
         self.declare_parameter("frame_id", "")
 
@@ -28,6 +28,8 @@ class LeaderJointPublisher(Node):
 
         period = 1.0 / max(self.publish_rate_hz, 1e-6)
         self.timer = self.create_timer(period, self._on_timer)
+        self._leader_connected = False
+        self._warned_no_leader = False
         
         cfg_cls = None
         for obj in vars(violin_mod).values():
@@ -40,13 +42,27 @@ class LeaderJointPublisher(Node):
         teleop = cfg_cls.__name__.removesuffix("Config")
         teleop_cls = getattr(violin_mod, teleop)
         self.leader = teleop_cls(cfg)
-        self.leader.connect()
+        try:
+            self.leader.connect()
+            self._leader_connected = True
+        except Exception as exc:
+            self.get_logger().warning(
+                f"Leader arm not connected; publishing zeros for visualization. Error: {exc}"
+            )
         
     def _read_leader_joint_positions(self) -> list[float]:
         """
         Return joint positions in radians, same order as self.joint_names.
         Replace this with your Lerobot read code.
         """
+        if not self._leader_connected:
+            if not self._warned_no_leader:
+                self.get_logger().warning(
+                    "Leader arm disconnected; continuing to publish zero joint positions."
+                )
+                self._warned_no_leader = True
+            return [0.0] * len(self.leader_joint_names)
+
         observe = self.leader.get_action()
         keys = sorted(observe.keys())
         joint_vals = []
