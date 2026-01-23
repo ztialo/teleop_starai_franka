@@ -42,17 +42,18 @@ class LeaderJointPublisher(Node):
                 break
         assert cfg_cls is not None, "Could not find a TeleoperatorConfig in lerobot_teleoperator_violin"
 
-        cfg = cfg_cls(port="/dev/ttyUSB0", id="violin_leader_arm")
+        cfg = cfg_cls(port="/dev/ttyUSB1", id="my_awesome_staraiviolin_arm")
         teleop = cfg_cls.__name__.removesuffix("Config")
         teleop_cls = getattr(violin_mod, teleop)
         self.leader = teleop_cls(cfg)
         try:
             self.leader.connect()
             self._leader_connected = True
+            print("[INFO] Leader arm connected successfully.", flush=True)
         except Exception as exc:
-            self.get_logger().warning(
-                f"Leader arm not connected; publishing zeros for visualization. Error: {exc}"
-            )
+            print(f"[WARN] Leader arm not connected; publishing zeros. Error: {exc}", flush=True)
+
+
         
     def _read_leader_joint_positions(self) -> list[float]:
         """
@@ -101,6 +102,7 @@ class LeaderJointPublisher(Node):
         msg.position = position_list
         self.leader_pub.publish(msg)
         
+        # Consider we are locking the 3rd joint!!!! 
         # reusing the sample joint position values to control franka arm for now
         msg.name = self.franka_joint_names
         msg.position = position_list

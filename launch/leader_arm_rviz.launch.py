@@ -52,6 +52,7 @@ def generate_launch_description() -> LaunchDescription:
                 package="leader_arm_viz",
                 executable="leader_joint_publisher",
                 name="leader_joint_publisher",
+                output='screen',
                 parameters=[
                     {
                         "publish_rate_hz": publish_rate_hz,
