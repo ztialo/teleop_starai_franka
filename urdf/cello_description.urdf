@@ -5,7 +5,7 @@
 <robot
   name="cello_description">
       <!-- 添加虚拟根链接 -->
-  <link name="world"/>
+  <link name="leader_frame"/>
 
   <!-- 添加固定关节 -->
   <joint name="lf_to_base" type="fixed">
