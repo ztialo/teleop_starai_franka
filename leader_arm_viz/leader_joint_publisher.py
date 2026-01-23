@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -18,8 +19,12 @@ class LeaderJointPublisher(Node):
         self.declare_parameter("frame_id", "")
 
         self.publish_rate_hz = float(self.get_parameter("publish_rate_hz").value)
-        self.leader_joint_names = list(self.get_parameter("leader_joint_names").value)
-        self.franka_joint_names = list(self.get_parameter("franka_joint_names").value)
+        self.leader_joint_names = self._coerce_joint_names(
+            self.get_parameter("leader_joint_names").value
+        )
+        self.franka_joint_names = self._coerce_joint_names(
+            self.get_parameter("franka_joint_names").value
+        )
         self.frame_id = str(self.get_parameter("frame_id").value)
 
         # queue depth of 10
@@ -72,6 +77,19 @@ class LeaderJointPublisher(Node):
             v = np.array(v).reshape(-1)[0]
             joint_vals.append(float(v))
         return joint_vals
+
+    def _coerce_joint_names(self, value) -> list[str]:
+        if isinstance(value, list):
+            return [str(item) for item in value]
+        if isinstance(value, str):
+            try:
+                parsed = ast.literal_eval(value)
+            except (SyntaxError, ValueError):
+                return [value]
+            if isinstance(parsed, list):
+                return [str(item) for item in parsed]
+            return [str(parsed)]
+        return [str(value)]
 
     def _on_timer(self):
         msg = JointState()

@@ -8,7 +8,6 @@ from launch.actions import DeclareLaunchArgument
 from launch.conditions import IfCondition
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 
 
 def _read_text(path: Path) -> str:
@@ -56,8 +55,8 @@ def generate_launch_description() -> LaunchDescription:
                 parameters=[
                     {
                         "publish_rate_hz": publish_rate_hz,
-                        "leader_joint_names": ParameterValue(leader_joint_names, value_type=list),
-                        "franka_joint_names": ParameterValue(franka_joint_names, value_type=list),
+                        "leader_joint_names": leader_joint_names,
+                        "franka_joint_names": franka_joint_names,
                         "frame_id": frame_id,
                     }
                 ],
