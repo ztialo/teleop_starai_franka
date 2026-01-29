@@ -125,7 +125,7 @@ class LeaderJointPublisher(Node):
 
         msg.name = self.leader_joint_names
         position_list = self._read_leader_joint_positions()
-        msg.position = position_list
+        msg.position = self.position_to_radian(position_list)
         self.leader_pub.publish(msg)
         
         # Consider we are locking the 3rd joint!!!! 

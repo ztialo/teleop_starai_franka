@@ -30,6 +30,7 @@ setup(
     entry_points={
         "console_scripts": [
             "leader_joint_publisher = leader_arm_viz.leader_joint_publisher:main",
+            "end_effector_publisher = leader_arm_viz.end_effector_publisher:main",
             # optional:
             # "read_leader = leader_arm_viz.read_leader:main",
         ],

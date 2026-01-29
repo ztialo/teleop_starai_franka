@@ -77,13 +77,19 @@ def generate_launch_description() -> LaunchDescription:
                 package="tf2_ros",
                 executable="static_transform_publisher",
                 name="world_to_leader_frame",
-                arguments=["1", "0", "0", "0", "0", "0", "world", "leader_frame"],
+                arguments=["0", "0", "0", "0", "0", "0", "world", "leader_frame"],
             ),
             Node(
                 package="tf2_ros",
                 executable="static_transform_publisher",
                 name="world_to_fr3_frame",
                 arguments=["0", "0", "0", "0", "0", "0", "world", "fr3_frame"],
+            ),
+            Node(
+                package="leader_arm_viz",
+                executable="end_effector_publisher",
+                name="end_effector_publisher",
+                output='screen',
             ),
         ]
     )
