@@ -1,5 +1,4 @@
 # Python bytecode
 __pycache__/
 *.py[cod]
-.vscode/browse.vc.db
-.vscode/*.db
+.vscode/

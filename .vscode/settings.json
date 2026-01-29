@@ -1,6 +1,7 @@
 {
     "ROS2.distro": "jazzy",
     "python.analysis.extraPaths": [
-        "/opt/ros/jazzy/lib/python3.12/site-packages"
+        "/opt/ros/jazzy/lib/python3.12/site-packages",
+        "/home/zdli/miniconda3/lib/python3.13/site-packages"
     ]
 }
