@@ -10,7 +10,6 @@ Panels:
         - /TF1/Frames1
         - /TF1/Tree1
         - /RobotModel1
-        - /RobotModel1/Status1
       Splitter Ratio: 0.5
     Tree Height: 542
   - Class: rviz_common/Selection
@@ -62,45 +61,27 @@ Visualization Manager:
         base_link:
           Value: true
         fr3_frame:
-          Value: true
-        fr3_link0:
-          Value: false
-        fr3_link1:
-          Value: true
-        fr3_link2:
-          Value: true
-        fr3_link3:
-          Value: true
-        fr3_link4:
-          Value: true
-        fr3_link5:
-          Value: true
-        fr3_link6:
-          Value: true
-        fr3_link7:
-          Value: false
-        fr3_link8:
           Value: false
         leader_frame:
-          Value: true
+          Value: false
         link1:
-          Value: true
+          Value: false
         link2:
-          Value: true
+          Value: false
         link3:
-          Value: true
+          Value: false
         link4:
-          Value: true
+          Value: false
         link5:
-          Value: true
+          Value: false
         link6:
           Value: true
         link7_left:
-          Value: true
+          Value: false
         link7_right:
-          Value: true
+          Value: false
         world:
-          Value: true
+          Value: false
       Marker Scale: 1
       Name: TF
       Show Arrows: true
@@ -109,16 +90,7 @@ Visualization Manager:
       Tree:
         world:
           fr3_frame:
-            fr3_link0:
-              fr3_link1:
-                fr3_link2:
-                  fr3_link3:
-                    fr3_link4:
-                      fr3_link5:
-                        fr3_link6:
-                          fr3_link7:
-                            fr3_link8:
-                              {}
+            {}
           leader_frame:
             base_link:
               link1:
@@ -146,52 +118,60 @@ Visualization Manager:
         Value: /robot_description
       Enabled: true
       Links:
-        All Links Enabled:
-          {}
+        All Links Enabled: true
         Expand Joint Details: false
         Expand Link Details: false
         Expand Tree: false
         Link Tree Style: Links in Alphabetic Order
-        fr3_frame:
+        base_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        fr3_link0:
+          Value: true
+        leader_frame:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        fr3_link1:
+        link1:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        fr3_link2:
+          Value: true
+        link2:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        fr3_link3:
+          Value: true
+        link3:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        fr3_link4:
+          Value: true
+        link4:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        fr3_link5:
+          Value: true
+        link5:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        fr3_link6:
+          Value: true
+        link6:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        fr3_link7:
+          Value: true
+        link7_left:
           Alpha: 1
           Show Axes: false
           Show Trail: false
-        fr3_link8:
+          Value: true
+        link7_right:
           Alpha: 1
           Show Axes: false
           Show Trail: false
+          Value: true
       Mass Properties:
         Inertia: false
         Mass: false
