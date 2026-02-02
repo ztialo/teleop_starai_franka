@@ -5,6 +5,7 @@ import lerobot_teleoperator_violin as violin_mod
 from lerobot.teleoperators.config import TeleoperatorConfig
 from geometry_msgs.msg import PoseStamped
 from sensor_msgs.msg import JointState
+from std_msgs.msg import Float64MultiArray
 from scipy.spatial.transform import Rotation
 import numpy as np
 
@@ -26,56 +27,17 @@ class FrankyListener(Node):
             self.gripper_cb,             # callback
             1,                  # QoS depth
         )
+        self.base2eef_tmat_sub = self.create_subscription(
+            Float64MultiArray,
+            "/eef_tf_matrix",
+            self.tf_cb,
+            1,
+        )
         self.controller = controller
 
     def eef_cb(self, msg: PoseStamped):
-        q = [
-            msg.pose.orientation.x,
-            msg.pose.orientation.y,
-            msg.pose.orientation.z,
-            msg.pose.orientation.w,
-        ]
-        r,p,y = Rotation.from_quat(q).as_euler("xyz", degrees=False)
-
-        r = r
-        p = p
-        y = -y
-        # print(f"Current orientation x: {r:.2f}, y: {p:.2f}, z: {y:.2f}", flush=True)
-        q_new = Rotation.from_euler("xyz", [r, p, y]).as_quat()
-
-        msg.pose.orientation.x = q_new[0]
-        msg.pose.orientation.y = q_new[1]
-        msg.pose.orientation.z = q_new[2]
-        msg.pose.orientation.w = q_new[3]
-
-        if self.controller.franka_init_pose is None:
-            self.controller.franka_init_pose = self.controller.robot.current_cartesian_state.pose.end_effector_pose
-
-        if self.controller.current_eef_pose is None and self.controller.leader_connected:
-            # initialize initial eef pose only if leader arm is connected
-            self.controller.current_eef_pose = [
-                msg.pose.position.x,
-                msg.pose.position.y,
-                msg.pose.position.z,
-                msg.pose.orientation.x,
-                msg.pose.orientation.y,
-                msg.pose.orientation.z,
-                msg.pose.orientation.w,
-            ]
-            # self.get_logger().info(
-            #     "Initial EEF pose:  [%s, %s, %s], [%s, %s, %s, %s]",
-            #     msg.pose.position.x, msg.pose.position.y, msg.pose.position.z,
-            #     msg.pose.orientation.x, msg.pose.orientation.y, msg.pose.orientation.z, msg.pose.orientation.w
-            # )
-            self.controller.current_q_inverse = Rotation.from_quat([
-                msg.pose.orientation.x,
-                msg.pose.orientation.y,
-                msg.pose.orientation.z,
-                msg.pose.orientation.w,
-            ]).inv()
-
-        elif self.controller.current_eef_pose is not None and self.controller.leader_connected:
-            # update current eef pose to controller
+        if self.controller.Tmat_base2eef_leader is not None:
+            # update current eef pose to controller if tmat is ready
             self.controller.update_current_pose(msg)
 
     def gripper_cb(self, msg: JointState):
@@ -83,13 +45,21 @@ class FrankyListener(Node):
             width = msg.position[0]
             self.controller.update_gripper(width)
 
+    def tf_cb(self, msg: Float64MultiArray):
+        """ transformation matrix from leader's base to initial eef pose"""
+        if self.controller.Tmat_base2eef_leader is None:
+            data = np.array(msg.data).reshape(4, 4)
+            self.controller.Tmat_base2eef_leader = data
+
 
 class FrankyController:
     def __init__(self):
         # franka
         self.robot = Robot(ROBOT_IP)
         self.robot.recover_from_errors()
-        self.robot.relative_dynamics_factor = 0.03 # slow/safe
+        self.robot.relative_dynamics_factor = 0.03  # slow/safe
+        self.robot_eef_init_pose = self.robot.current_pose.end_effector_pose
+        self.Tmat_eef2base_franka = self.robot_eef_init_pose.matrix
 
         # gripper
         self.gripper = Gripper(ROBOT_IP)
@@ -98,34 +68,12 @@ class FrankyController:
         self.gripper_closed = False
 
         # leader
-        # self.leader = self._leader_init()
-        self.leader_connected = True
+        self.leader_eef_q_cur = None
+        self.Tmat_base2eef_leader = None
+        self.leader_connected = False
 
-        # franka 
-        self.franka_init_pose = None
-
-        self.current_eef_pose = None
-        self.current_q_inverse = None
-
-    def _leader_init(self):
-        cfg_cls = None
-        for obj in vars(violin_mod).values():
-            if isinstance(obj, type) and issubclass(obj, TeleoperatorConfig) and obj is not TeleoperatorConfig:
-                cfg_cls = obj
-                break
-        assert cfg_cls is not None, "Could not find a TeleoperatorConfig in lerobot_teleoperator_violin"
-
-        cfg = cfg_cls(port="/dev/ttyUSB0", id="my_awesome_staraiviolin_arm")
-        teleop = cfg_cls.__name__.removesuffix("Config")
-        teleop_cls = getattr(violin_mod, teleop)
-        self.leader = teleop_cls(cfg)
-
-        try:
-            self.leader.connect()
-            print("[INFO] Leader arm connected successfully.", flush=True)
-            self.leader_connected = True
-        except Exception as exc:
-            print(f"[WARN] Leader arm not connected; publishing zeros. Error: {exc}", flush=True)
+        # check rotation alignment
+        self.aligned = self._check_rotation_mat()
 
     def _move_arm(self, translation: list, rotation: list):
         motion = CartesianMotion(Affine(translation, rotation), ReferenceType.Absolute)
@@ -139,55 +87,87 @@ class FrankyController:
 
     def _close_gripper(self, speed = 0.05, force = 20.0, epsilon_outer = 1.0):
         # self.gripper.grasp(0.0, speed, force, epsilon_outer)
-        # print(f"[INFO] Close gripper to width: {0.0} m", flush=True)
-        pass 
+        print(f"[INFO] Close gripper to width: {0.0} m", flush=True)
 
     def update_current_pose(self, msg: PoseStamped):
-        # calculate the translation and rotation relative to the initial pose
-        dx = msg.pose.position.x - self.current_eef_pose[0]
-        dy = msg.pose.position.y - self.current_eef_pose[1]
-        dz = msg.pose.position.z - self.current_eef_pose[2]
-        translation_rel = np.array([[dx], [-dy], [-dz]], dtype=np.float64)
+        if self.aligned:
+            self.leader_eef_q_cur_w = [
+                msg.pose.position.x,
+                msg.pose.position.y,
+                msg.pose.position.z,
+                msg.pose.orientation.x,
+                msg.pose.orientation.y,
+                msg.pose.orientation.z,
+                msg.pose.orientation.w,
+            ]
+            # express leader pose in its EEF frame (i.e., delta from initial EEF)
+            leader_pose_eef = self.leader_base2eef_delta(self.leader_eef_q_cur_w)
+            if leader_pose_eef is not None:
+                # map that delta into Franka base frame for absolute move
+                eef_q_cmd_franka_base = self.franka_eef2base(leader_pose_eef)
+                trans = np.array(eef_q_cmd_franka_base[:3]).reshape(3, 1)
+                quat = np.array(eef_q_cmd_franka_base[3:]).reshape(4, 1)
+                self._move_arm(trans, quat)
 
-        q_current = [
-            msg.pose.orientation.x,
-            msg.pose.orientation.y,
-            msg.pose.orientation.z,
-            msg.pose.orientation.w,
-        ]
-        # relative rotation is q_rel = q_current * q_initial_inverse
-        q_rel = (Rotation.from_quat(q_current) * self.current_q_inverse).as_quat()
-        rotation_rel = q_rel.reshape(4, 1).astype(np.float64)
+    def franka_eef2base(self, pose_eef_vec: list[float]):
+        """Map a pose expressed in the leader EEF frame into Franka base frame (absolute command)."""
+        # build homogeneous from pose vector
+        T_pose_eef = np.eye(4)
+        T_pose_eef[:3, :3] = Rotation.from_quat(pose_eef_vec[3:]).as_matrix()
+        T_pose_eef[:3, 3] = pose_eef_vec[:3]
 
-        # update current relative pose
-        self.current_eef_pose = [
-            msg.pose.position.x,
-            msg.pose.position.y,
-            msg.pose.position.z,
-            msg.pose.orientation.x,
-            msg.pose.orientation.y,
-            msg.pose.orientation.z,
-            msg.pose.orientation.w,
-        ]
-        self.current_q_inverse = Rotation.from_quat([
-            msg.pose.orientation.x,
-            msg.pose.orientation.y,
-            msg.pose.orientation.z,
-            msg.pose.orientation.w,
-        ]).inv()
+        # Franka init pose gives base <- eef; apply delta in that frame
+        T_pose_base = self.Tmat_eef2base_franka @ T_pose_eef
 
-        # read current franka eef pose
-        affine_cur = self.robot.current_cartesian_state.pose.end_effector_pose
-        # print(f"[INFO] Current Franka EEF pose: translation {affine_cur.translation.flatten()}, quaternion {affine_cur.quaternion.flatten()}", flush=True)
+        trans_base = T_pose_base[:3, 3]
+        quat_base = Rotation.from_matrix(T_pose_base[:3, :3]).as_quat()
+        return np.concatenate([trans_base, quat_base]).tolist()
 
-        self._move_arm(translation_rel, rotation_rel)
+    def leader_base2eef_delta(self, pose_world: list[float]):
+        """Express leader pose (in base frame) inside the leader EEF frame (delta from initial EEF).
+
+        pose_world: [x, y, z, qx, qy, qz, qw]
+        returns [x, y, z, qx, qy, qz, qw] in EEF frame, or None if TF is unavailable.
+        """
+        if self.Tmat_base2eef_leader is None:
+            return None
+
+        T_eef_from_base = np.linalg.inv(self.Tmat_base2eef_leader)  # eef <- base
+
+        # build homogeneous pose matrix from world pose
+        T_pose_base = np.eye(4)
+        T_pose_base[:3, :3] = Rotation.from_quat(pose_world[3:]).as_matrix()
+        T_pose_base[:3, 3] = pose_world[:3]
+
+        # express pose in eef frame
+        T_pose_eef = T_eef_from_base @ T_pose_base
+        trans_eef = T_pose_eef[:3, 3]
+        quat_eef = Rotation.from_matrix(T_pose_eef[:3, :3]).as_quat()
+        return np.concatenate([trans_eef, quat_eef]).tolist()
+
+    def _check_rotation_mat(self):
+        if self.Tmat_base2eef_leader is not None and self.Tmat_eef2base_franka is not None:
+            R_leader = self.Tmat_base2eef_leader[:3, :3]
+            R_franka = self.Tmat_eef2base_franka[:3, :3]
+            # relative rotation: leader frame to franka frame
+            R_err = R_leader @ R_franka
+            cos_angle = (np.trace(R_err) - 1.0) / 2.0
+            cos_angle = np.clip(cos_angle, -1.0, 1.0)  # guard numeric drift
+            angle = np.arccos(cos_angle)
+            aligned = angle < 1e-3
+            if not aligned:
+                print(f"[WARN] Base/EEF frames misaligned by {np.degrees(angle):.4f} deg", flush=True)
+            else:
+                print("[INFO] Leader and Franka rotation frames are aligned", flush=True)
+            return aligned
+        return False
 
     def update_gripper(self, width: float):
         # print(f"[INFO] Update gripper to width: {width} m", flush=True)
         if width < 0.04 and not self.gripper_closed:
             print("below threshold, closing gripper")
             success = self.gripper.grasp(0.0, 0.05, self.gripper_force, 1.0)
-            
+
             # self._close_gripper(0.0, self.gripper_speed) # close
             self.gripper_closed = True
         elif width >= 0.04:
