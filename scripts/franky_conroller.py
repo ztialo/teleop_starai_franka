@@ -156,7 +156,20 @@ class FrankyController:
             angle = np.arccos(cos_angle)
             aligned = angle < 1e-3
             if not aligned:
-                print(f"[WARN] Base/EEF frames misaligned by {np.degrees(angle):.4f} deg", flush=True)
+                rotvec = Rotation.from_matrix(R_err).as_rotvec()
+                axis = rotvec / (angle + 1e-9)  # axis is expressed in leader base frame
+                print(
+                    f"[WARN] Base/EEF frames misaligned by {np.degrees(angle):.4f} deg "
+                    f"around axis {axis}",
+                    flush=True,
+                )
+                # rotation that maps leader frame into Franka frame
+                R_correction = R_err.T
+                quat_correction = Rotation.from_matrix(R_correction).as_quat()
+                print(
+                    f"[INFO] Apply correction quat (leader->franka): {quat_correction}",
+                    flush=True,
+                )
             else:
                 print("[INFO] Leader and Franka rotation frames are aligned", flush=True)
             return aligned
