@@ -51,6 +51,9 @@ class FrankyListener(Node):
             data = np.array(msg.data).reshape(4, 4)
             self.controller.Tmat_base2eef_leader = data
 
+        if self.controller.aligned is None:
+            self.controller.aligned = self.controller._check_rotation_mat()
+
 
 class FrankyController:
     def __init__(self):
@@ -73,7 +76,7 @@ class FrankyController:
         self.leader_connected = False
 
         # check rotation alignment
-        self.aligned = self._check_rotation_mat()
+        self.aligned = None
 
     def _move_arm(self, translation: list, rotation: list):
         motion = CartesianMotion(Affine(translation, rotation), ReferenceType.Absolute)
@@ -149,8 +152,9 @@ class FrankyController:
         if self.Tmat_base2eef_leader is not None and self.Tmat_eef2base_franka is not None:
             R_leader = self.Tmat_base2eef_leader[:3, :3]
             R_franka = self.Tmat_eef2base_franka[:3, :3]
+            R_correction = Rotation.from_quat([0.06208786, -0.05418672, 0.71933027, 0.6897629]).as_matrix()
             # relative rotation: leader frame to franka frame
-            R_err = R_leader @ R_franka
+            R_err = R_leader @ R_correction @ R_franka
             cos_angle = (np.trace(R_err) - 1.0) / 2.0
             cos_angle = np.clip(cos_angle, -1.0, 1.0)  # guard numeric drift
             angle = np.arccos(cos_angle)
