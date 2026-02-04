@@ -170,6 +170,15 @@ class FrankyController:
                     f"[INFO] Apply correction quat (leader->franka): {quat_correction}",
                     flush=True,
                 )
+                # verify correction by applying on leader side: (R_correction @ R_leader) * R_franka ≈ I
+                R_err_corrected = (R_correction @ R_leader) @ R_franka
+                angle_corr = np.arccos(
+                    np.clip((np.trace(R_err_corrected) - 1.0) / 2.0, -1.0, 1.0)
+                )
+                print(
+                    f"[INFO] Residual after applying correction: {np.degrees(angle_corr):.4f} deg",
+                    flush=True,
+                )
             else:
                 print("[INFO] Leader and Franka rotation frames are aligned", flush=True)
             return aligned
