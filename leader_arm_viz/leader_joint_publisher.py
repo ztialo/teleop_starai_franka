@@ -51,6 +51,7 @@ class LeaderJointPublisher(Node):
 
         period = 1.0 / max(self.publish_rate_hz, 1e-6)
         self.timer = self.create_timer(period, self._on_timer)
+        self.gripper_timer = self.create_timer(0.02, self._on_gripper_timer)  # gripper updates at 50 Hz
         self._leader_connected = False
         self._warned_no_leader = False
 
@@ -136,7 +137,13 @@ class LeaderJointPublisher(Node):
         msg.position = self.position_to_radian(position_list)
         self.franka_pub.publish(msg)
 
+    def _on_gripper_timer(self):
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+        if self.frame_id:
+            msg.header.frame_id = self.frame_id
         msg.name = ["gripper_joint"]
+        position_list = self._read_leader_joint_positions()
         # publish raw position (not radians) for the gripper joint
         msg.position = [float(position_list[6])/1000.0]
         self.gripper_pub.publish(msg)

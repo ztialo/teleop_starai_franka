@@ -56,13 +56,13 @@ class FrankyController:
         # franka
         self.robot = Robot(ROBOT_IP)
         self.robot.recover_from_errors()
-        self.robot.relative_dynamics_factor = 0.03  # slow/safe
+        self.robot.relative_dynamics_factor = 0.075  # slow/safe
         self.robot_eef_init_pose = self.robot.current_pose.end_effector_pose
         self.Tmat_eef2base_franka = self.robot_eef_init_pose.matrix
 
         # gripper
         self.gripper = Gripper(ROBOT_IP)
-        self.gripper_speed = 0.05
+        self.gripper_speed = 0.075
         self.gripper_force = 40.0
         self.gripper_closed = False
 
@@ -167,12 +167,12 @@ class FrankyController:
         # print(f"[INFO] Update gripper to width: {width} m", flush=True)
         if width < 0.04 and not self.gripper_closed:
             print("below threshold, closing gripper")
-            success = self.gripper.grasp(0.0, 0.05, self.gripper_force, 1.0)
+            success = self.gripper.grasp_async(0.0, 0.05, self.gripper_force, 0.0025, 0.1)
 
             # self._close_gripper(0.0, self.gripper_speed) # close
             self.gripper_closed = True
         elif width >= 0.04:
-            self._move_gripper(width, self.gripper_speed)  # open
+            self._move_gripper(0.1, self.gripper_speed)  # open
             self.gripper_closed = False
 
 
