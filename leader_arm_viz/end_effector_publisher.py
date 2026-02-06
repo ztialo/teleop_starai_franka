@@ -12,7 +12,7 @@ class EEFPoseReader(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.timer = self.create_timer(0.01, self.read_publish_pose) # 100 Hz
+        self.timer = self.create_timer(0.1, self.read_publish_pose) # 10 Hz
         self.eef_pub = self.create_publisher(PoseStamped, '/eef_pose', 10)
         self.tf_mat_pub = self.create_publisher(Float64MultiArray, '/eef_tf_matrix', 10)
         self.tf_matrix_timer = self.create_timer(1.0, self.publish_tf_matrix)  # slow timer
@@ -47,9 +47,10 @@ class EEFPoseReader(Node):
     def publish_tf_matrix(self):
         """Publish the 4x4 transform matrix at a slower rate for consumers that need it once in a while."""
         try:
+            # transform from source to target
             transform = self.tf_buffer.lookup_transform(
-                'base_link',
-                'link6',
+                'base_link', # target
+                'link6',  # source 
                 rclpy.time.Time()
             )
         except Exception:

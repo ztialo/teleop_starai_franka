@@ -36,23 +36,19 @@ class FrankyListener(Node):
         self.controller = controller
 
     def eef_cb(self, msg: PoseStamped):
-        if self.controller.Tmat_base2eef_leader is not None:
+        if self.controller.Tmat_eef2base_leader is not None:
             # update current eef pose to controller if tmat is ready
             self.controller.update_current_pose(msg)
 
     def gripper_cb(self, msg: JointState):
-        if self.controller.leader_connected:
-            width = msg.position[0]
-            self.controller.update_gripper(width)
+        width = msg.position[0]
+        self.controller.update_gripper(width)
 
     def tf_cb(self, msg: Float64MultiArray):
         """ transformation matrix from leader's base to initial eef pose"""
-        if self.controller.Tmat_base2eef_leader is None:
+        if self.controller.Tmat_eef2base_leader is None:
             data = np.array(msg.data).reshape(4, 4)
-            self.controller.Tmat_base2eef_leader = data
-
-        if self.controller.aligned is None:
-            self.controller.aligned = self.controller._check_rotation_mat()
+            self.controller.Tmat_eef2base_leader = data
 
 
 class FrankyController:
@@ -72,11 +68,12 @@ class FrankyController:
 
         # leader
         self.leader_eef_q_cur = None
-        self.Tmat_base2eef_leader = None
-        self.leader_connected = False
+        self.Tmat_eef2base_leader = None
 
         # check rotation alignment
-        self.aligned = None
+        self.aligned = False
+        self.correction_tmat = None
+
 
     def _move_arm(self, translation: list, rotation: list):
         motion = CartesianMotion(Affine(translation, rotation), ReferenceType.Absolute)
@@ -93,24 +90,42 @@ class FrankyController:
         print(f"[INFO] Close gripper to width: {0.0} m", flush=True)
 
     def update_current_pose(self, msg: PoseStamped):
-        if self.aligned:
-            self.leader_eef_q_cur_w = [
-                msg.pose.position.x,
-                msg.pose.position.y,
-                msg.pose.position.z,
-                msg.pose.orientation.x,
-                msg.pose.orientation.y,
-                msg.pose.orientation.z,
-                msg.pose.orientation.w,
-            ]
-            # express leader pose in its EEF frame (i.e., delta from initial EEF)
-            leader_pose_eef = self.leader_base2eef_delta(self.leader_eef_q_cur_w)
-            if leader_pose_eef is not None:
-                # map that delta into Franka base frame for absolute move
-                eef_q_cmd_franka_base = self.franka_eef2base(leader_pose_eef)
-                trans = np.array(eef_q_cmd_franka_base[:3]).reshape(3, 1)
-                quat = np.array(eef_q_cmd_franka_base[3:]).reshape(4, 1)
-                self._move_arm(trans, quat)
+        self.leader_eef_q_cur_w = [
+            msg.pose.position.x,
+            msg.pose.position.y,
+            msg.pose.position.z,
+            msg.pose.orientation.x,
+            msg.pose.orientation.y,
+            msg.pose.orientation.z,
+            msg.pose.orientation.w,
+        ]
+        # express leader pose in its EEF frame (i.e., delta from initial EEF)
+        leader_pose_eef = self.leader_base2eef_delta(self.leader_eef_q_cur_w)
+        if leader_pose_eef is not None:
+            # transform eef pose in leader eef frame to franka eef frame
+            # leader_pose_eef_corrected = self._apply_correction(leader_pose_eef)
+            # map that delta into Franka base frame for absolute move
+            eef_q_cmd_franka_base = self.franka_eef2base(leader_pose_eef)
+            trans = np.array(eef_q_cmd_franka_base[:3]).reshape(3, 1)
+            quat = np.array(eef_q_cmd_franka_base[3:]).reshape(4, 1)
+            self._move_arm(trans, quat)
+            
+
+    def _apply_correction(self, pose_eef_vec: list[float]):
+        """Apply rotation correction to leader eef pose vector."""
+        # build homogeneous from pose vector
+        T_pose_eef = np.eye(4)
+        T_pose_eef[:3, :3] = Rotation.from_quat(pose_eef_vec[3:]).as_matrix()
+        T_pose_eef[:3, 3] = pose_eef_vec[:3]
+
+        # apply rotation correction
+        T_corrected = np.eye(4)
+        T_corrected[:3, :3] = self.correction_rotmat @ T_pose_eef[:3, :3]
+        T_corrected[:3, 3] = T_pose_eef[:3, 3]
+
+        trans_corrected = T_corrected[:3, 3]
+        quat_corrected = Rotation.from_matrix(T_corrected[:3, :3]).as_quat()
+        return np.concatenate([trans_corrected, quat_corrected]).tolist()
 
     def franka_eef2base(self, pose_eef_vec: list[float]):
         """Map a pose expressed in the leader EEF frame into Franka base frame (absolute command)."""
@@ -132,10 +147,10 @@ class FrankyController:
         pose_world: [x, y, z, qx, qy, qz, qw]
         returns [x, y, z, qx, qy, qz, qw] in EEF frame, or None if TF is unavailable.
         """
-        if self.Tmat_base2eef_leader is None:
+        if self.Tmat_eef2base_leader is None:
             return None
 
-        T_eef_from_base = np.linalg.inv(self.Tmat_base2eef_leader)  # eef <- base
+        T_base2eef = np.linalg.inv(self.Tmat_eef2base_leader)  # base -> eef
 
         # build homogeneous pose matrix from world pose
         T_pose_base = np.eye(4)
@@ -143,50 +158,10 @@ class FrankyController:
         T_pose_base[:3, 3] = pose_world[:3]
 
         # express pose in eef frame
-        T_pose_eef = T_eef_from_base @ T_pose_base
+        T_pose_eef = T_base2eef @ T_pose_base
         trans_eef = T_pose_eef[:3, 3]
         quat_eef = Rotation.from_matrix(T_pose_eef[:3, :3]).as_quat()
         return np.concatenate([trans_eef, quat_eef]).tolist()
-
-    def _check_rotation_mat(self):
-        if self.Tmat_base2eef_leader is not None and self.Tmat_eef2base_franka is not None:
-            R_leader = self.Tmat_base2eef_leader[:3, :3]
-            R_franka = self.Tmat_eef2base_franka[:3, :3]
-            R_correction = Rotation.from_quat([0.06208786, -0.05418672, 0.71933027, 0.6897629]).as_matrix()
-            # relative rotation: leader frame to franka frame
-            R_err = R_leader @ R_correction @ R_franka
-            cos_angle = (np.trace(R_err) - 1.0) / 2.0
-            cos_angle = np.clip(cos_angle, -1.0, 1.0)  # guard numeric drift
-            angle = np.arccos(cos_angle)
-            aligned = angle < 1e-3
-            if not aligned:
-                rotvec = Rotation.from_matrix(R_err).as_rotvec()
-                axis = rotvec / (angle + 1e-9)  # axis is expressed in leader base frame
-                print(
-                    f"[WARN] Base/EEF frames misaligned by {np.degrees(angle):.4f} deg "
-                    f"around axis {axis}",
-                    flush=True,
-                )
-                # rotation that maps leader frame into Franka frame
-                R_correction = R_err.T
-                quat_correction = Rotation.from_matrix(R_correction).as_quat()
-                print(
-                    f"[INFO] Apply correction quat (leader->franka): {quat_correction}",
-                    flush=True,
-                )
-                # verify correction by applying on leader side: (R_correction @ R_leader) * R_franka ≈ I
-                R_err_corrected = (R_correction @ R_leader) @ R_franka
-                angle_corr = np.arccos(
-                    np.clip((np.trace(R_err_corrected) - 1.0) / 2.0, -1.0, 1.0)
-                )
-                print(
-                    f"[INFO] Residual after applying correction: {np.degrees(angle_corr):.4f} deg",
-                    flush=True,
-                )
-            else:
-                print("[INFO] Leader and Franka rotation frames are aligned", flush=True)
-            return aligned
-        return False
 
     def update_gripper(self, width: float):
         # print(f"[INFO] Update gripper to width: {width} m", flush=True)
@@ -200,10 +175,6 @@ class FrankyController:
             self._move_gripper(width, self.gripper_speed)  # open
             self.gripper_closed = False
 
-        # if self.gripper.state.is_grasped() and :
-        #     cur_width = self.gripper.state.width
-        #     print(f"[INFO] Gripper is closed. Current width: {cur_width} m", flush=True)
-        #     self._move_gripper(cur_width-0.003, self.gripper_speed)  # maintain grip
 
 def main():
     rclpy.init()
