@@ -12,7 +12,7 @@ class EEFPoseReader(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        self.timer = self.create_timer(0.005, self.read_publish_pose) # 20 Hz
+        self.timer = self.create_timer(0.1, self.read_publish_pose) # 10 Hz
         self.eef_pub = self.create_publisher(PoseStamped, '/eef_pose', 10)
         self.tf_mat_pub = self.create_publisher(Float64MultiArray, '/eef_tf_matrix', 10)
         self.tf_matrix_timer = self.create_timer(1.0, self.publish_tf_matrix)  # slow timer

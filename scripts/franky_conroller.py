@@ -1,4 +1,4 @@
-from franky import Affine, CartesianMotion, Robot, ReferenceType, Gripper
+from franky import Affine, CartesianMotion, Robot, ReferenceType, Gripper, RelativeDynamicsFactor
 import rclpy
 from rclpy.node import Node
 import lerobot_teleoperator_violin as violin_mod
@@ -69,7 +69,7 @@ class FrankyListener(Node):
 
     def gripper_cb(self, msg: JointState):
         width = msg.position[0]
-        self.controller.update_gripper(width)
+        # self.controller.update_gripper(width)
 
     def tf_cb(self, msg: Float64MultiArray):
         """ transformation matrix from leader's base to initial eef pose"""
@@ -83,7 +83,8 @@ class FrankyController:
         # franka
         self.robot = Robot(ROBOT_IP)
         self.robot.recover_from_errors()
-        self.robot.relative_dynamics_factor = 0.075  # slow/safe
+        # self.robot.relative_dynamics_factor = RelativeDynamicsFactor(0.12, 0.12, 0.05)  # slow/safe
+        self.robot.relative_dynamics_factor = 0.1
         self.robot_eef_init_pose = self.robot.current_pose.end_effector_pose
         self.Tmat_eef2base_franka = self.robot_eef_init_pose.matrix
 
@@ -106,6 +107,7 @@ class FrankyController:
         motion = CartesianMotion(Affine(translation, rotation), ReferenceType.Absolute)
         print(f"[INFO] Move rotation: {rotation.flatten()}", flush=True)
         self.robot.move(motion, asynchronous=True)
+        # self.robot.join_motion()
 
     def _move_gripper(self, width: float, speed):
         # move the fingers to a specific width
