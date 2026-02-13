@@ -10,6 +10,8 @@ from scipy.spatial.transform import Rotation
 import numpy as np
 
 ROBOT_IP = "192.168.137.2"
+LEADER2FRANKA_TSCALE_FACTOR = 1  # ratio of franka2desk / leader2desk
+
 
 def quat_normalize_xyzw(q):
     q = np.asarray(q, dtype=float)
@@ -18,10 +20,12 @@ def quat_normalize_xyzw(q):
         raise ValueError("Zero-norm quaternion")
     return q / n
 
+
 def quat_conj_xyzw(q):
     # for unit quats, inverse == conjugate
     x, y, z, w = q
     return np.array([-x, -y, -z,  w], dtype=float)
+
 
 def quat_mul_xyzw(q1, q2):
     # Hamilton product, both [x,y,z,w]
@@ -33,6 +37,7 @@ def quat_mul_xyzw(q1, q2):
         w1*z2 + x1*y2 - y1*x2 + z1*w2,
         w1*w2 - x1*x2 - y1*y2 - z1*z2
     ], dtype=float)
+
 
 class FrankyListener(Node):
     def __init__(self, controller):
@@ -94,8 +99,10 @@ class FrankyController:
 
         # filter
         self.eef_q_prev = None
+        self.gripper_width_prev = None
 
     def _move_arm(self, translation: list, rotation: list):
+        # t_scaled = self._scale_tranlation(translation)
         motion = CartesianMotion(Affine(translation, rotation), ReferenceType.Absolute)
         print(f"[INFO] Move rotation: {rotation.flatten()}", flush=True)
         self.robot.move(motion, asynchronous=True)
@@ -103,6 +110,9 @@ class FrankyController:
     def _move_gripper(self, width: float, speed):
         # move the fingers to a specific width
         self.gripper.move_async(width, speed)
+
+    def _scale_translation(self, t):
+        return t * LEADER2FRANKA_TSCALE_FACTOR
 
     def update_current_pose(self, msg: PoseStamped):
         self.leader_eef_q_cur_w = [
@@ -121,6 +131,8 @@ class FrankyController:
         elif not self._valid_pose_change(self.leader_eef_q_cur_w):
             # skip command if changes are too small
             return
+        else:
+            self.eef_q_prev = self.leader_eef_q_cur_w
 
         # express leader pose in its EEF frame (i.e., delta from initial EEF)
         leader_pose_eef = self.leader_base2eef_delta(self.leader_eef_q_cur_w)
@@ -132,6 +144,13 @@ class FrankyController:
             self._move_arm(trans, quat)
 
     def update_gripper(self, width: float):
+        if self.gripper_width_prev is None:
+            self.gripper_width_prev = width
+        elif np.linalg.norm(width - self.gripper_width_prev) < 0.01:
+            return
+        else:
+            self.gripper_width_prev = width
+
         if width < 0.04 and not self.gripper_closed:
             print("below threshold, closing gripper")
             self.gripper.grasp_async(0.0, 0.05, self.gripper_force, 0.0025, 0.1)
