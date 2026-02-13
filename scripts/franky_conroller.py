@@ -11,6 +11,28 @@ import numpy as np
 
 ROBOT_IP = "192.168.137.2"
 
+def quat_normalize_xyzw(q):
+    q = np.asarray(q, dtype=float)
+    n = np.linalg.norm(q)
+    if n == 0:
+        raise ValueError("Zero-norm quaternion")
+    return q / n
+
+def quat_conj_xyzw(q):
+    # for unit quats, inverse == conjugate
+    x, y, z, w = q
+    return np.array([-x, -y, -z,  w], dtype=float)
+
+def quat_mul_xyzw(q1, q2):
+    # Hamilton product, both [x,y,z,w]
+    x1,y1,z1,w1 = q1
+    x2,y2,z2,w2 = q2
+    return np.array([
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        w1*w2 - x1*x2 - y1*y2 - z1*z2
+    ], dtype=float)
 
 class FrankyListener(Node):
     def __init__(self, controller):
@@ -70,10 +92,8 @@ class FrankyController:
         self.leader_eef_q_cur = None
         self.Tmat_eef2base_leader = None
 
-        # check rotation alignment
-        self.aligned = False
-        self.correction_tmat = None
-
+        # filter
+        self.eef_q_prev = None
 
     def _move_arm(self, translation: list, rotation: list):
         motion = CartesianMotion(Affine(translation, rotation), ReferenceType.Absolute)
@@ -82,12 +102,7 @@ class FrankyController:
 
     def _move_gripper(self, width: float, speed):
         # move the fingers to a specific width
-        success = self.gripper.move_async(width, speed)
-        # print(f"[INFO] Move gripper to width: {width} m", flush=True)
-
-    def _close_gripper(self, speed = 0.05, force = 20.0, epsilon_outer = 1.0):
-        # self.gripper.grasp(0.0, speed, force, epsilon_outer)
-        print(f"[INFO] Close gripper to width: {0.0} m", flush=True)
+        self.gripper.move_async(width, speed)
 
     def update_current_pose(self, msg: PoseStamped):
         self.leader_eef_q_cur_w = [
@@ -99,33 +114,48 @@ class FrankyController:
             msg.pose.orientation.z,
             msg.pose.orientation.w,
         ]
+
+        # delta filter
+        if self.eef_q_prev is None:
+            self.eef_q_prev = self.leader_eef_q_cur_w
+        elif not self._valid_pose_change(self.leader_eef_q_cur_w):
+            # skip command if changes are too small
+            return
+
         # express leader pose in its EEF frame (i.e., delta from initial EEF)
         leader_pose_eef = self.leader_base2eef_delta(self.leader_eef_q_cur_w)
         if leader_pose_eef is not None:
             # transform eef pose in leader eef frame to franka eef frame
-            # leader_pose_eef_corrected = self._apply_correction(leader_pose_eef)
-            # map that delta into Franka base frame for absolute move
             eef_q_cmd_franka_base = self.franka_eef2base(leader_pose_eef)
             trans = np.array(eef_q_cmd_franka_base[:3]).reshape(3, 1)
             quat = np.array(eef_q_cmd_franka_base[3:]).reshape(4, 1)
             self._move_arm(trans, quat)
-            
 
-    def _apply_correction(self, pose_eef_vec: list[float]):
-        """Apply rotation correction to leader eef pose vector."""
-        # build homogeneous from pose vector
-        T_pose_eef = np.eye(4)
-        T_pose_eef[:3, :3] = Rotation.from_quat(pose_eef_vec[3:]).as_matrix()
-        T_pose_eef[:3, 3] = pose_eef_vec[:3]
+    def update_gripper(self, width: float):
+        if width < 0.04 and not self.gripper_closed:
+            print("below threshold, closing gripper")
+            self.gripper.grasp_async(0.0, 0.05, self.gripper_force, 0.0025, 0.1)
+            self.gripper_closed = True
+        elif width >= 0.04:
+            self._move_gripper(0.1, self.gripper_speed)  # open
+            self.gripper_closed = False
 
-        # apply rotation correction
-        T_corrected = np.eye(4)
-        T_corrected[:3, :3] = self.correction_rotmat @ T_pose_eef[:3, :3]
-        T_corrected[:3, 3] = T_pose_eef[:3, 3]
+    def _valid_pose_change(self, eef_q_cur):
+        pos_delta = np.linalg.norm(eef_q_cur[:3] - self.eef_q_prev[:3])
+        q_cur = quat_normalize_xyzw(np.asarray(eef_q_cur[3:7], dtype=float))
+        q_prev = quat_normalize_xyzw(np.asarray(self.eef_q_prev[3:7], dtype=float))
 
-        trans_corrected = T_corrected[:3, 3]
-        quat_corrected = Rotation.from_matrix(T_corrected[:3, :3]).as_quat()
-        return np.concatenate([trans_corrected, quat_corrected]).tolist()
+        q_err = quat_mul_xyzw(q_cur, quat_conj_xyzw(q_prev))
+        w_err = np.clip(abs(q_err[3]), -1.0, 1.0)
+        rot_delta = 2.0 * np.arccos(w_err)
+
+        # translation threshold  & rotation threshold 2 degrees
+        t_threshold = 0.001  # 1 mm
+        q_threshold = np.deg2rad(2.0)  # 2 degress
+        if pos_delta > t_threshold and rot_delta > q_threshold:
+            return True
+        else:
+            return False
 
     def franka_eef2base(self, pose_eef_vec: list[float]):
         """Map a pose expressed in the leader EEF frame into Franka base frame (absolute command)."""
@@ -162,18 +192,6 @@ class FrankyController:
         trans_eef = T_pose_eef[:3, 3]
         quat_eef = Rotation.from_matrix(T_pose_eef[:3, :3]).as_quat()
         return np.concatenate([trans_eef, quat_eef]).tolist()
-
-    def update_gripper(self, width: float):
-        # print(f"[INFO] Update gripper to width: {width} m", flush=True)
-        if width < 0.04 and not self.gripper_closed:
-            print("below threshold, closing gripper")
-            success = self.gripper.grasp_async(0.0, 0.05, self.gripper_force, 0.0025, 0.1)
-
-            # self._close_gripper(0.0, self.gripper_speed) # close
-            self.gripper_closed = True
-        elif width >= 0.04:
-            self._move_gripper(0.1, self.gripper_speed)  # open
-            self.gripper_closed = False
 
 
 def main():
