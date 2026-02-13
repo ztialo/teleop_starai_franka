@@ -1,0 +1,38 @@
+running develop
+running egg_info
+creating leader_arm_viz.egg-info
+writing leader_arm_viz.egg-info/PKG-INFO
+writing dependency_links to leader_arm_viz.egg-info/dependency_links.txt
+writing entry points to leader_arm_viz.egg-info/entry_points.txt
+writing requirements to leader_arm_viz.egg-info/requires.txt
+writing top-level names to leader_arm_viz.egg-info/top_level.txt
+writing manifest file 'leader_arm_viz.egg-info/SOURCES.txt'
+reading manifest file 'leader_arm_viz.egg-info/SOURCES.txt'
+writing manifest file 'leader_arm_viz.egg-info/SOURCES.txt'
+running build_ext
+Creating /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/lib/python3.10/site-packages/leader-arm-viz.egg-link (link to .)
+Installing end_effector_publisher script to /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/lib/leader_arm_viz
+Installing leader_joint_publisher script to /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/lib/leader_arm_viz
+
+Installed /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz
+running symlink_data
+creating /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/ament_index/resource_index/packages
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/resource/leader_arm_viz -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/ament_index/resource_index/packages
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/package.xml -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz
+creating /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/launch
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/launch/leader_arm_rviz.launch.py -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/launch
+creating /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/urdf
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/urdf/fr3.urdf -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/urdf
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/urdf/cello_description.urdf -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/urdf
+creating /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/meshes
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/meshes/link4.STL -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/meshes
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/meshes/link3.STL -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/meshes
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/meshes/link7_right.STL -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/meshes
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/meshes/base_link.STL -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/meshes
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/meshes/link7_left.STL -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/meshes
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/meshes/link2.STL -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/meshes
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/meshes/link1.STL -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/meshes
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/meshes/link6.STL -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/meshes
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/meshes/link5.STL -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/meshes
+creating /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/rviz
+symbolically linking /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/build/leader_arm_viz/rviz/view.rviz -> /home/tactilemanipulationlab/lerobot/teleop_ws/src/leader_arm_viz/install/leader_arm_viz/share/leader_arm_viz/rviz

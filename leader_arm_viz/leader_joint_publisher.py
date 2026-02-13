@@ -46,7 +46,6 @@ class LeaderJointPublisher(Node):
 
         # queue depth of 10
         self.leader_pub = self.create_publisher(JointState, "/leader/joint_states", 10)
-        self.franka_pub = self.create_publisher(JointState, "/joint_command_fr3", 10)
         self.gripper_pub = self.create_publisher(JointState, "/gripper_command_fr3", 10)
 
         period = 1.0 / max(self.publish_rate_hz, 1e-6)
@@ -130,10 +129,6 @@ class LeaderJointPublisher(Node):
         position_list = self._read_leader_joint_positions()
         msg.position = self.position_to_radian(position_list)
         self.leader_pub.publish(msg)
-        
-        msg.name = self.franka_joint_names
-        msg.position = self.position_to_radian(position_list)
-        self.franka_pub.publish(msg)
 
     def _on_gripper_timer(self):
         msg = JointState()

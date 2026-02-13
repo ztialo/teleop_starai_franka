@@ -8,9 +8,13 @@ from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 from scipy.spatial.transform import Rotation
 import numpy as np
+from rclpy.executors import MultiThreadedExecutor
+
 
 ROBOT_IP = "192.168.137.2"
-LEADER2FRANKA_TSCALE_FACTOR = 1  # ratio of franka2desk / leader2desk
+LEADER2FRANKA_TSCALE_FACTOR = 2  # ratio of franka2desk / leader2desk
+
+franka_joint_names = ["fr3_joint1","fr3_joint2","fr3_joint3","fr3_joint4","fr3_joint5","fr3_joint6","fr3_joint7","fr3_finger_joint1","fr3_finger_joint2"]
 
 
 def quat_normalize_xyzw(q):
@@ -37,6 +41,24 @@ def quat_mul_xyzw(q1, q2):
         w1*z2 + x1*y2 - y1*x2 + z1*w2,
         w1*w2 - x1*x2 - y1*y2 - z1*z2
     ], dtype=float)
+
+
+class FrankaTwinNode(Node):
+    def __init__(self, controller) -> None:
+        super().__init__("franka_twin_node")
+        self.controller = controller
+        self.joint_pub = self.create_publisher(JointState, "/joint_cmd_fr3_isaac", 10)
+        self.timer = self.create_timer(0.05, self.publish_joint_commands)  # 20 Hz
+
+    def publish_joint_commands(self):
+        # get current joint positions from real franka
+        joint_pos = self.controller.robot.current_joint_positions
+        msg = JointState()
+        msg.header.stamp = self.get_clock().now().to_msg()
+
+        msg.name = franka_joint_names
+        msg.position = joint_pos.flatten().tolist() + [0.04, 0.04]  # Append gripper positions
+        self.joint_pub.publish(msg)
 
 
 class FrankyListener(Node):
@@ -69,7 +91,7 @@ class FrankyListener(Node):
 
     def gripper_cb(self, msg: JointState):
         width = msg.position[0]
-        # self.controller.update_gripper(width)
+        self.controller.update_gripper(width)
 
     def tf_cb(self, msg: Float64MultiArray):
         """ transformation matrix from leader's base to initial eef pose"""
@@ -84,7 +106,7 @@ class FrankyController:
         self.robot = Robot(ROBOT_IP)
         self.robot.recover_from_errors()
         # self.robot.relative_dynamics_factor = RelativeDynamicsFactor(0.12, 0.12, 0.05)  # slow/safe
-        self.robot.relative_dynamics_factor = 0.1
+        self.robot.relative_dynamics_factor = 0.03
         self.robot_eef_init_pose = self.robot.current_pose.end_effector_pose
         self.Tmat_eef2base_franka = self.robot_eef_init_pose.matrix
 
@@ -103,9 +125,8 @@ class FrankyController:
         self.gripper_width_prev = None
 
     def _move_arm(self, translation: list, rotation: list):
-        # t_scaled = self._scale_tranlation(translation)
         motion = CartesianMotion(Affine(translation, rotation), ReferenceType.Absolute)
-        print(f"[INFO] Move rotation: {rotation.flatten()}", flush=True)
+        # print(f"[INFO] Move rotation: {rotation.flatten()}", flush=True)
         self.robot.move(motion, asynchronous=True)
         # self.robot.join_motion()
 
@@ -162,7 +183,7 @@ class FrankyController:
             self.gripper_closed = False
 
     def _valid_pose_change(self, eef_q_cur):
-        pos_delta = np.linalg.norm(eef_q_cur[:3] - self.eef_q_prev[:3])
+        pos_delta = np.linalg.norm(np.asarray(eef_q_cur[:3]) - np.asarray(self.eef_q_prev[:3]))
         q_cur = quat_normalize_xyzw(np.asarray(eef_q_cur[3:7], dtype=float))
         q_prev = quat_normalize_xyzw(np.asarray(self.eef_q_prev[3:7], dtype=float))
 
@@ -211,6 +232,7 @@ class FrankyController:
         # express pose in eef frame
         T_pose_eef = T_base2eef @ T_pose_base
         trans_eef = T_pose_eef[:3, 3]
+        trans_eef = self._scale_translation(trans_eef)
         quat_eef = Rotation.from_matrix(T_pose_eef[:3, :3]).as_quat()
         return np.concatenate([trans_eef, quat_eef]).tolist()
 
@@ -219,10 +241,16 @@ def main():
     rclpy.init()
     controller = FrankyController()
     node = FrankyListener(controller)
-    rclpy.spin(node)
-    node.destroy_node()
-    rclpy.shutdown()
-
+    twin_node = FrankaTwinNode(controller)
+    executor = MultiThreadedExecutor()
+    executor.add_node(node)
+    executor.add_node(twin_node)
+    try:
+        executor.spin()
+    finally:
+        node.destroy_node()
+        twin_node.destroy_node()
+        rclpy.shutdown()
 
 if __name__ == "__main__":
     main()
