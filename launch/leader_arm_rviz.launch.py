@@ -18,6 +18,7 @@ def generate_launch_description() -> LaunchDescription:
     use_rviz = LaunchConfiguration("use_rviz")
     publish_rate_hz = LaunchConfiguration("publish_rate_hz")
     frame_id = LaunchConfiguration("frame_id")
+    leader_port = LaunchConfiguration("leader_port")
     leader_joint_names = LaunchConfiguration("leader_joint_names")
     franka_joint_names = LaunchConfiguration("franka_joint_names")
 
@@ -29,6 +30,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("rviz_config", default_value=str(pkg_share / "rviz" / "view.rviz")),
             DeclareLaunchArgument("publish_rate_hz", default_value="100.0"),
             DeclareLaunchArgument("frame_id", default_value="world"),
+            DeclareLaunchArgument("leader_port", default_value="/dev/ttyUSB0"),
             DeclareLaunchArgument(
                 "leader_joint_names",
                 default_value="['joint1','joint2','joint3','joint4','joint5','joint6','joint7_left']",
@@ -62,6 +64,7 @@ def generate_launch_description() -> LaunchDescription:
                         "leader_joint_names": leader_joint_names,
                         "franka_joint_names": franka_joint_names,
                         "frame_id": frame_id,
+                        "leader_port": leader_port,
                     }
                 ],
             ),

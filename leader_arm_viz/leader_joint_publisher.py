@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ast
+import glob
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -34,6 +35,9 @@ class LeaderJointPublisher(Node):
         self.declare_parameter("leader_joint_names", ["joint1", "joint2", "joint3", "joint4", "joint5", "joint6", "joint7_left",])
         self.declare_parameter("franka_joint_names", ["fr3_joint1", "fr3_joint2", "fr3_joint3", "fr3_joint4", "fr3_joint5", "fr3_joint6", "fr3_joint7",])   
         self.declare_parameter("frame_id", "")
+        self.declare_parameter("leader_port", "/dev/ttyUSB0")
+        self.declare_parameter("leader_id", "my_awesome_staraiviolin_arm")
+        self.declare_parameter("auto_detect_leader_port", True)
 
         self.publish_rate_hz = float(self.get_parameter("publish_rate_hz").value)
         self.leader_joint_names = self._coerce_joint_names(
@@ -43,6 +47,9 @@ class LeaderJointPublisher(Node):
             self.get_parameter("franka_joint_names").value
         )
         self.frame_id = str(self.get_parameter("frame_id").value)
+        self.leader_port = str(self.get_parameter("leader_port").value)
+        self.leader_id = str(self.get_parameter("leader_id").value)
+        self.auto_detect_leader_port = bool(self.get_parameter("auto_detect_leader_port").value)
 
         # queue depth of 10
         self.leader_pub = self.create_publisher(JointState, "/leader/joint_states", 10)
@@ -53,6 +60,7 @@ class LeaderJointPublisher(Node):
         self.gripper_timer = self.create_timer(0.02, self._on_gripper_timer)  # gripper updates at 50 Hz
         self._leader_connected = False
         self._warned_no_leader = False
+        self.leader = None
 
         cfg_cls = None
         for obj in vars(violin_mod).values():
@@ -60,17 +68,46 @@ class LeaderJointPublisher(Node):
                 cfg_cls = obj
                 break
         assert cfg_cls is not None, "Could not find a TeleoperatorConfig in lerobot_teleoperator_violin"
-        
-        cfg = cfg_cls(port="/dev/ttyUSB0", id="my_awesome_staraiviolin_arm")
+
+        selected_port = self._resolve_leader_port()
+        if selected_port is None:
+            self.get_logger().warning(
+                "Leader arm not connected; publishing fallback pose. "
+                "No serial device found (checked /dev/ttyUSB* and /dev/ttyACM*)."
+            )
+            return
+
+        cfg = cfg_cls(port=selected_port, id=self.leader_id)
         teleop = cfg_cls.__name__.removesuffix("Config")
         teleop_cls = getattr(violin_mod, teleop)
         self.leader = teleop_cls(cfg)
         try:
             self.leader.connect()
             self._leader_connected = True
-            print("[INFO] Leader arm connected successfully.", flush=True)
+            print(f"[INFO] Leader arm connected successfully on {selected_port}.", flush=True)
         except Exception as exc:
-            print(f"[WARN] Leader arm not connected; publishing zeros. Error: {exc}", flush=True)
+            print(
+                f"[WARN] Leader arm not connected; publishing fallback pose. "
+                f"Port: {selected_port}. Error: {exc}",
+                flush=True,
+            )
+
+    def _resolve_leader_port(self) -> str | None:
+        if self.leader_port and glob.glob(self.leader_port):
+            return self.leader_port
+
+        if not self.auto_detect_leader_port:
+            return None
+
+        candidates = sorted(glob.glob('/dev/ttyUSB*')) + sorted(glob.glob('/dev/ttyACM*'))
+        if not candidates:
+            return None
+
+        if self.leader_port and self.leader_port != candidates[0]:
+            self.get_logger().warning(
+                f"Requested leader_port '{self.leader_port}' not found; using '{candidates[0]}' instead."
+            )
+        return candidates[0]
 
     def _read_leader_joint_positions(self) -> list[float]:
         """
@@ -80,7 +117,7 @@ class LeaderJointPublisher(Node):
         if not self._leader_connected:
             if not self._warned_no_leader:
                 self.get_logger().warning(
-                    "Leader arm disconnected; continuing to publish zero joint positions."
+                    "Leader arm disconnected; continuing to publish fallback pose."
                 )
                 self._warned_no_leader = True
             return [0.0, 0.157, 0.0628, 0.0, 1.413, -1.2939, -0.025]  # home position in radians
