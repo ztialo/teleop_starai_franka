@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import glob
+import inspect
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
@@ -38,6 +39,7 @@ class LeaderJointPublisher(Node):
         self.declare_parameter("leader_port", "/dev/ttyUSB0")
         self.declare_parameter("leader_id", "my_awesome_staraiviolin_arm")
         self.declare_parameter("auto_detect_leader_port", True)
+        self.declare_parameter("leader_motor_topic", "/leader/motor_positions")
 
         self.publish_rate_hz = float(self.get_parameter("publish_rate_hz").value)
         self.leader_joint_names = self._coerce_joint_names(
@@ -50,10 +52,12 @@ class LeaderJointPublisher(Node):
         self.leader_port = str(self.get_parameter("leader_port").value)
         self.leader_id = str(self.get_parameter("leader_id").value)
         self.auto_detect_leader_port = bool(self.get_parameter("auto_detect_leader_port").value)
+        self.leader_motor_topic = str(self.get_parameter("leader_motor_topic").value)
 
         # queue depth of 10
         self.leader_pub = self.create_publisher(JointState, "/leader/joint_states", 10)
         self.gripper_pub = self.create_publisher(JointState, "/gripper_command_fr3", 10)
+        self.leader_motor_pub = self.create_publisher(JointState, self.leader_motor_topic, 10)
 
         period = 1.0 / max(self.publish_rate_hz, 1e-6)
         self.timer = self.create_timer(period, self._on_timer)
@@ -78,6 +82,7 @@ class LeaderJointPublisher(Node):
             return
 
         cfg = cfg_cls(port=selected_port, id=self.leader_id)
+        self._sanitize_config_optionals(cfg)
         teleop = cfg_cls.__name__.removesuffix("Config")
         teleop_cls = getattr(violin_mod, teleop)
         self.leader = teleop_cls(cfg)
@@ -86,11 +91,64 @@ class LeaderJointPublisher(Node):
             self._leader_connected = True
             print(f"[INFO] Leader arm connected successfully on {selected_port}.", flush=True)
         except Exception as exc:
+            # Retry once after sanitizing possibly missing config fields.
+            if self._retry_connect_with_fallback_cfg(cfg_cls, teleop_cls, selected_port):
+                return
             print(
                 f"[WARN] Leader arm not connected; publishing fallback pose. "
                 f"Port: {selected_port}. Error: {exc}",
                 flush=True,
             )
+
+    def _sanitize_config_optionals(self, cfg) -> None:
+        fallback_map = {
+            "baudrate": 1000000,
+            "baud_rate": 1000000,
+            "timeout": 1.0,
+            "read_timeout": 1.0,
+            "write_timeout": 1.0,
+        }
+        for field, fallback in fallback_map.items():
+            if hasattr(cfg, field) and getattr(cfg, field) is None:
+                setattr(cfg, field, fallback)
+                self.get_logger().warning(
+                    f"Config field '{field}' was None; defaulting to {fallback}."
+                )
+
+    def _build_fallback_cfg_kwargs(self, cfg_cls, selected_port: str) -> dict:
+        kwargs = {"port": selected_port, "id": self.leader_id}
+        try:
+            sig = inspect.signature(cfg_cls)
+        except Exception:
+            return kwargs
+
+        for name, param in sig.parameters.items():
+            if name in kwargs or name == "self":
+                continue
+            if param.default is inspect.Parameter.empty:
+                continue
+            if param.default is not None:
+                continue
+            if "timeout" in name:
+                kwargs[name] = 1.0
+            elif "baud" in name:
+                kwargs[name] = 1000000
+        return kwargs
+
+    def _retry_connect_with_fallback_cfg(self, cfg_cls, teleop_cls, selected_port: str) -> bool:
+        try:
+            cfg = cfg_cls(**self._build_fallback_cfg_kwargs(cfg_cls, selected_port))
+            self._sanitize_config_optionals(cfg)
+            self.leader = teleop_cls(cfg)
+            self.leader.connect()
+            self._leader_connected = True
+            print(
+                f"[INFO] Leader arm connected successfully on retry with fallback config on {selected_port}.",
+                flush=True,
+            )
+            return True
+        except Exception:
+            return False
 
     def _resolve_leader_port(self) -> str | None:
         if self.leader_port and glob.glob(self.leader_port):
@@ -157,13 +215,22 @@ class LeaderJointPublisher(Node):
         return [str(value)]
 
     def _on_timer(self):
+        position_list = self._read_leader_joint_positions()
+
+        motor_msg = JointState()
+        motor_msg.header.stamp = self.get_clock().now().to_msg()
+        if self.frame_id:
+            motor_msg.header.frame_id = self.frame_id
+        motor_msg.name = self.leader_joint_names
+        motor_msg.position = [float(v) for v in position_list]
+        self.leader_motor_pub.publish(motor_msg)
+
         msg = JointState()
-        msg.header.stamp = self.get_clock().now().to_msg()
+        msg.header = motor_msg.header
         if self.frame_id:
             msg.header.frame_id = self.frame_id
 
         msg.name = self.leader_joint_names
-        position_list = self._read_leader_joint_positions()
         msg.position = self.position_to_radian(position_list)
         self.leader_pub.publish(msg)
 
