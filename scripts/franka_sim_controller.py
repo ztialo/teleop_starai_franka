@@ -85,7 +85,7 @@ FR3_HOME_JOINT_TARGETS = {
     "fr3_finger_joint1": 0.04,
     "fr3_finger_joint2": 0.04,
 }
-FR3_HOME_SETTLE_SECONDS = 2.0
+FR3_HOME_SETTLE_SECONDS = 0.5
 
 
 def _ensure_isaac_imports() -> None:
@@ -349,6 +349,7 @@ class FrankaTeleopAttachRuntime:
         self._homing_elapsed_s = 0.0
         self._home_joint_positions_cache: Optional[np.ndarray] = None
         self._home_joint_targets_available = True
+        self._stopped = False
 
     def start(self) -> None:
         stage = omni.usd.get_context().get_stage()
@@ -404,6 +405,7 @@ class FrankaTeleopAttachRuntime:
             print("[INFO] Target visualization is disabled. Driving FR3 directly from teleop commands.", flush=True)
 
     def shutdown(self) -> None:
+        self._stopped = True
         self._physics_sub = None
         self._update_sub = None
         self._timeline_sub = None
@@ -426,11 +428,26 @@ class FrankaTeleopAttachRuntime:
         self._home_joint_positions_cache = None
         self._home_joint_targets_available = True
 
+    def _stop_runtime_after_timeline_end(self) -> None:
+        global _RUNTIME
+        if self._stopped:
+            return
+        self.shutdown()
+        if _RUNTIME is self:
+            _RUNTIME = None
+        print("[INFO] Timeline ended. Teleop runtime stopped. Run start() to run again.", flush=True)
+
     def _on_timeline_event(self, event: Any) -> None:
         event_type = int(event.type)
+        stop_like_types = {int(omni.timeline.TimelineEventType.STOP)}
+        pause_event = getattr(omni.timeline.TimelineEventType, "PAUSE", None)
+        if pause_event is not None:
+            stop_like_types.add(int(pause_event))
+        if event_type in stop_like_types:
+            self._stop_runtime_after_timeline_end()
+            return
         if event_type in (
             int(omni.timeline.TimelineEventType.PLAY),
-            int(omni.timeline.TimelineEventType.STOP),
         ):
             self._reset_needed = True
             self._warned_waiting_for_pose = False
