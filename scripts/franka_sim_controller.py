@@ -49,11 +49,7 @@ TRANSLATION_MAPPING_MODE = "world_delta"  # "world_delta" (default) or "local_de
 # 1) delta_q = q_current * conj(q_ref), cmd_q = delta_q * q_home
 # 2) delta_q = conj(q_ref) * q_current, cmd_q = q_home * delta_q
 ORIENTATION_MAPPING_MODE = "current_conjref__delta_home"  # or "conjref_current__home_delta"
-ENABLE_TELEOP_DEBUG = True
-TELEOP_DEBUG_EVERY_N_STEPS = 120
 SEND_ORIENTATION_TARGET = True
-ENABLE_ACTION_DEBUG = True
-ACTION_DEBUG_EVERY_N_STEPS = 120
 # Incoming quaternion order for 4-element sequence outputs from OmniGraph.
 # ROS geometry_msgs uses (x, y, z, w). Isaac Core APIs expect (w, x, y, z).
 OG_SEQUENCE_QUAT_ORDER = "xyzw"  # or "wxyz" if your node already outputs scalar-first
@@ -73,7 +69,6 @@ OG_POSE_OUTPUT_ATTR_CANDIDATES = [
     "outputs:message",
     "outputs:data:pose",
 ]
-MISSING_POSE_DEBUG_EVERY_N_STEPS = 120
 FR3_HOME_JOINT_TARGETS = {
     "fr3_joint1": 0.0,
     "fr3_joint2": -0.785,
@@ -276,13 +271,6 @@ def _read_og_leaf_scalar(base_attr_path: str, component: str) -> Optional[float]
     return None
 
 
-def _short_repr(value: Any, limit: int = 160) -> str:
-    text = repr(value)
-    if len(text) <= limit:
-        return text
-    return f"{text[:limit]}..."
-
-
 def _fmt_seq(value: Sequence[float] | np.ndarray, decimals: int = 3) -> str:
     arr = np.asarray(value, dtype=np.float64).reshape(-1)
     return "[" + ", ".join(f"{v:.{decimals}f}" for v in arr) + "]"
@@ -342,14 +330,31 @@ class FrankaTeleopAttachRuntime:
         self._input_ref_orientation: Optional[np.ndarray] = None
         self._warned_waiting_home_pose = False
         self._disable_target_updates = not ENABLE_TARGET_VISUALIZATION
-        self._teleop_debug_steps = 0
-        self._action_debug_steps = 0
         self._printed_initial_pose_snapshot = False
         self._homing_done = False
         self._homing_elapsed_s = 0.0
         self._home_joint_positions_cache: Optional[np.ndarray] = None
         self._home_joint_targets_available = True
         self._stopped = False
+
+    def _reset_cycle_state(self) -> None:
+        self._reset_needed = True
+        self._warned_waiting_for_pose = False
+        self._missing_pose_steps = 0
+        self._warned_articulation_init = False
+        self._latest_target_pose = None
+        self._warned_waiting_home_pose = False
+
+    def _reset_relative_reference_state(self) -> None:
+        self._home_cmd_position = None
+        self._home_cmd_orientation = None
+        self._input_ref_position = None
+        self._input_ref_orientation = None
+        self._printed_initial_pose_snapshot = False
+        self._homing_done = False
+        self._homing_elapsed_s = 0.0
+        self._home_joint_positions_cache = None
+        self._home_joint_targets_available = True
 
     def start(self) -> None:
         stage = omni.usd.get_context().get_stage()
@@ -415,18 +420,9 @@ class FrankaTeleopAttachRuntime:
         self._articulation_controller = None
         self._world = None
         self._robot_ready = False
-        self._latest_target_pose = None
-        self._home_cmd_position = None
-        self._home_cmd_orientation = None
-        self._input_ref_position = None
-        self._input_ref_orientation = None
-        self._warned_waiting_home_pose = False
         self._disable_target_updates = not ENABLE_TARGET_VISUALIZATION
-        self._printed_initial_pose_snapshot = False
-        self._homing_done = False
-        self._homing_elapsed_s = 0.0
-        self._home_joint_positions_cache = None
-        self._home_joint_targets_available = True
+        self._reset_cycle_state()
+        self._reset_relative_reference_state()
 
     def _stop_runtime_after_timeline_end(self) -> None:
         global _RUNTIME
@@ -446,27 +442,9 @@ class FrankaTeleopAttachRuntime:
         if event_type in stop_like_types:
             self._stop_runtime_after_timeline_end()
             return
-        if event_type in (
-            int(omni.timeline.TimelineEventType.PLAY),
-        ):
-            self._reset_needed = True
-            self._warned_waiting_for_pose = False
-            self._missing_pose_steps = 0
-            self._warned_articulation_init = False
-            self._latest_target_pose = None
-            if event_type == int(omni.timeline.TimelineEventType.PLAY):
-                self._home_cmd_position = None
-                self._home_cmd_orientation = None
-                self._input_ref_position = None
-                self._input_ref_orientation = None
-                self._printed_initial_pose_snapshot = False
-                self._homing_done = False
-                self._homing_elapsed_s = 0.0
-                self._home_joint_positions_cache = None
-                self._home_joint_targets_available = True
-            self._warned_waiting_home_pose = False
-            self._teleop_debug_steps = 0
-            self._action_debug_steps = 0
+        if event_type == int(omni.timeline.TimelineEventType.PLAY):
+            self._reset_cycle_state()
+            self._reset_relative_reference_state()
 
     def _try_initialize_robot(self) -> bool:
         if self._fr3 is None or self._controller is None:
@@ -590,44 +568,6 @@ class FrankaTeleopAttachRuntime:
         except Exception:
             return None
 
-    def _log_teleop_debug(
-        self,
-        raw_input_pos: np.ndarray,
-        raw_input_ori: np.ndarray,
-        delta_pos_world: np.ndarray,
-        cmd_pos: np.ndarray,
-        cmd_ori: np.ndarray,
-    ) -> None:
-        if not ENABLE_TELEOP_DEBUG:
-            return
-        self._teleop_debug_steps += 1
-        if self._teleop_debug_steps % TELEOP_DEBUG_EVERY_N_STEPS != 0:
-            return
-        print(
-            f"[DEBUG][teleop] mode(trans={TRANSLATION_MAPPING_MODE}, orient={ORIENTATION_MAPPING_MODE})",
-            flush=True,
-        )
-        print(
-            f"[DEBUG][teleop] input_ref_pos={_fmt_seq(self._input_ref_position)} "
-            f"input_ref_ori_wxyz={_fmt_seq(self._input_ref_orientation)}",
-            flush=True,
-        )
-        print(
-            f"[DEBUG][teleop] home_pos={_fmt_seq(self._home_cmd_position)} "
-            f"home_ori_wxyz={_fmt_seq(self._home_cmd_orientation)}",
-            flush=True,
-        )
-        print(
-            f"[DEBUG][teleop] raw_input_pos={_fmt_seq(raw_input_pos)} "
-            f"raw_input_ori_wxyz={_fmt_seq(raw_input_ori)}",
-            flush=True,
-        )
-        print(
-            f"[DEBUG][teleop] delta_pos_world={_fmt_seq(delta_pos_world)} cmd_pos={_fmt_seq(cmd_pos)}",
-            flush=True,
-        )
-        print(f"[DEBUG][teleop] cmd_ori_wxyz={_fmt_seq(cmd_ori)}", flush=True)
-
     def _to_relative_command(
         self, input_position: np.ndarray, input_orientation: np.ndarray
     ) -> Optional[Tuple[np.ndarray, np.ndarray]]:
@@ -662,14 +602,6 @@ class FrankaTeleopAttachRuntime:
         else:
             delta_ori = _quat_mul_wxyz(in_ori, _quat_conj_wxyz(self._input_ref_orientation))
             cmd_ori = _quat_normalize_wxyz(_quat_mul_wxyz(delta_ori, self._home_cmd_orientation))
-
-        self._log_teleop_debug(
-            raw_input_pos=np.asarray(input_position, dtype=np.float64),
-            raw_input_ori=in_ori,
-            delta_pos_world=delta_pos_world,
-            cmd_pos=cmd_pos,
-            cmd_ori=cmd_ori,
-        )
 
         return cmd_pos, cmd_ori
 
@@ -712,23 +644,6 @@ class FrankaTeleopAttachRuntime:
             self._printed_initial_pose_snapshot = True
 
         return True
-
-    def _log_action_debug(self, actions: Any) -> None:
-        if not ENABLE_ACTION_DEBUG:
-            return
-        self._action_debug_steps += 1
-        if self._action_debug_steps % ACTION_DEBUG_EVERY_N_STEPS != 0:
-            return
-        jp = getattr(actions, "joint_positions", None)
-        jv = getattr(actions, "joint_velocities", None)
-        je = getattr(actions, "joint_efforts", None)
-        norm_jp = float(np.linalg.norm(np.asarray(jp, dtype=np.float64))) if jp is not None else 0.0
-        norm_jv = float(np.linalg.norm(np.asarray(jv, dtype=np.float64))) if jv is not None else 0.0
-        norm_je = float(np.linalg.norm(np.asarray(je, dtype=np.float64))) if je is not None else 0.0
-        print(
-            f"[DEBUG][action] |jp|={norm_jp:.3f} |jv|={norm_jv:.3f} |je|={norm_je:.3f}",
-            flush=True,
-        )
 
     def _read_target_pose_from_omnigraph(self) -> Optional[Tuple[list[float], list[float]]]:
         # OmniGraph data read happens here each step from the ROS2 Subscribe Pose node outputs.
@@ -780,29 +695,6 @@ class FrankaTeleopAttachRuntime:
             if pose is not None:
                 return pose
         return None
-
-    def _print_omnigraph_debug_snapshot(self) -> None:
-        print(f"[DEBUG] OmniGraph node path: {self._node_path}", flush=True)
-        for attr_path in self._position_attr_paths + self._orientation_attr_paths + self._pose_attr_paths:
-            raw = _read_og_attr(attr_path)
-            print(f"[DEBUG] {attr_path} -> {_short_repr(raw)}", flush=True)
-        for base in self._position_attr_paths:
-            print(
-                f"[DEBUG] {base}:x/y/z -> "
-                f"{_short_repr(_read_og_leaf_scalar(base, 'x'))}, "
-                f"{_short_repr(_read_og_leaf_scalar(base, 'y'))}, "
-                f"{_short_repr(_read_og_leaf_scalar(base, 'z'))}",
-                flush=True,
-            )
-        for base in self._orientation_attr_paths:
-            print(
-                f"[DEBUG] {base}:x/y/z/w -> "
-                f"{_short_repr(_read_og_leaf_scalar(base, 'x'))}, "
-                f"{_short_repr(_read_og_leaf_scalar(base, 'y'))}, "
-                f"{_short_repr(_read_og_leaf_scalar(base, 'z'))}, "
-                f"{_short_repr(_read_og_leaf_scalar(base, 'w'))}",
-                flush=True,
-            )
 
     def _on_update(self, event: Any) -> None:
         del event
@@ -871,13 +763,6 @@ class FrankaTeleopAttachRuntime:
             if not self._warned_waiting_for_pose:
                 print("[WARN] Waiting for first valid pose from OmniGraph ROS2 subscribe node.", flush=True)
                 self._warned_waiting_for_pose = True
-            if self._missing_pose_steps % MISSING_POSE_DEBUG_EVERY_N_STEPS == 0:
-                print(
-                    f"[WARN] Still no valid pose after {self._missing_pose_steps} physics steps. "
-                    "Dumping OmniGraph candidate attribute values:",
-                    flush=True,
-                )
-                self._print_omnigraph_debug_snapshot()
             return
         self._missing_pose_steps = 0
 
@@ -902,7 +787,6 @@ class FrankaTeleopAttachRuntime:
             target_end_effector_position=target_position_np,
             target_end_effector_orientation=target_ori_arg,
         )
-        self._log_action_debug(actions)
         self._articulation_controller.apply_action(actions)
 
 
@@ -917,15 +801,6 @@ def start() -> None:
         return
     _RUNTIME = FrankaTeleopAttachRuntime()
     _RUNTIME.start()
-
-
-def stop() -> None:
-    global _RUNTIME
-    if _RUNTIME is None:
-        return
-    _RUNTIME.shutdown()
-    _RUNTIME = None
-    print("[INFO] Teleop runtime stopped.", flush=True)
 
 
 if __name__ == "__main__":
