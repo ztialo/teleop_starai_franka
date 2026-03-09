@@ -36,6 +36,8 @@ ENABLE_TARGET_VISUALIZATION = False
 # Edit these paths if your Action Graph/node names or output attribute names differ.
 ACTION_GRAPH_PATH = "/Root/eef_pose_sub"
 ROS2_SUBSCRIBE_POSE_NODE_NAME = "ros2_subscribe_eef_pose"
+GRIPPER_ACTION_GRAPH_PATH = "/Root/gripper_controller"
+ROS2_SUBSCRIBE_GRIPPER_NODE_NAME = "ros2_subscribe_gripper_command"
 RMPFLOW_ROBOT_NAME = "FR3"
 
 # Relative teleop mapping:
@@ -69,6 +71,13 @@ OG_POSE_OUTPUT_ATTR_CANDIDATES = [
     "outputs:message",
     "outputs:data:pose",
 ]
+OG_GRIPPER_OUTPUT_ATTR_CANDIDATES = [
+    "outputs:position",
+    "outputs:message:position",
+    "outputs:data:position",
+    "outputs:message",
+    "outputs:data",
+]
 FR3_HOME_JOINT_TARGETS = {
     "fr3_joint1": 0.0,
     "fr3_joint2": -0.785,
@@ -81,6 +90,20 @@ FR3_HOME_JOINT_TARGETS = {
     "fr3_finger_joint2": 0.04,
 }
 FR3_HOME_SETTLE_SECONDS = 0.5
+GRIPPER_JOINT_NAMES = ("fr3_finger_joint1", "fr3_finger_joint2")
+GRIPPER_MIN_POS = 0.0
+GRIPPER_MAX_POS = 0.04
+GRIPPER_MAX_SPEED = 0.03  # finger joint position units per second
+LEFT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft/fr3/fr3_left_ft/fr3_gripper_left_ft"
+RIGHT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft/fr3/fr3_right_ft/fr3_gripper_right_ft"
+GRIPPER_CONTACT_FORCE_THRESHOLD = 2.0
+FT_FORCE_ATTR_CANDIDATES = [
+    "state:normalForce",
+    "state:force",
+    "state:linearForce",
+    "physxJoint:normalForce",
+    "physxJoint:force",
+]
 
 
 def _ensure_isaac_imports() -> None:
@@ -296,6 +319,52 @@ def _extract_pose_from_struct(raw_pose: Any) -> Optional[Tuple[list[float], list
     return None
 
 
+def _extract_gripper_width(raw_msg: Any) -> Optional[float]:
+    if raw_msg is None:
+        return None
+
+    names = None
+    positions = None
+
+    if hasattr(raw_msg, "name"):
+        names = getattr(raw_msg, "name", None)
+    if hasattr(raw_msg, "position"):
+        positions = getattr(raw_msg, "position", None)
+
+    if isinstance(raw_msg, dict):
+        names = raw_msg.get("name", names)
+        positions = raw_msg.get("position", positions)
+
+    if positions is None and isinstance(raw_msg, Sequence) and not isinstance(raw_msg, (str, bytes)):
+        if len(raw_msg) > 0:
+            try:
+                val = float(raw_msg[0])
+                return val if math.isfinite(val) else None
+            except Exception:
+                return None
+
+    if positions is not None and isinstance(positions, Sequence) and len(positions) > 0:
+        if names is not None and isinstance(names, Sequence):
+            for joint_name in ("gripper_joint", "fr3_finger_joint1", "fr3_finger_joint2"):
+                try:
+                    idx = list(names).index(joint_name)
+                    val = float(positions[idx])
+                    return val if math.isfinite(val) else None
+                except Exception:
+                    continue
+        try:
+            val = float(positions[0])
+            return val if math.isfinite(val) else None
+        except Exception:
+            return None
+
+    try:
+        val = float(raw_msg)
+        return val if math.isfinite(val) else None
+    except Exception:
+        return None
+
+
 class FrankaTeleopAttachRuntime:
     def __init__(self) -> None:
         node_path = f"{ACTION_GRAPH_PATH}/{ROS2_SUBSCRIBE_POSE_NODE_NAME}"
@@ -307,6 +376,8 @@ class FrankaTeleopAttachRuntime:
             f"{node_path}.{attr_name}" for attr_name in OG_ORIENTATION_OUTPUT_ATTR_CANDIDATES
         ]
         self._pose_attr_paths = [f"{node_path}.{attr_name}" for attr_name in OG_POSE_OUTPUT_ATTR_CANDIDATES]
+        gripper_node_path = f"{GRIPPER_ACTION_GRAPH_PATH}/{ROS2_SUBSCRIBE_GRIPPER_NODE_NAME}"
+        self._gripper_attr_paths = [f"{gripper_node_path}.{attr_name}" for attr_name in OG_GRIPPER_OUTPUT_ATTR_CANDIDATES]
 
         self._fr3: Optional[Any] = None
         self._target: Optional[Any] = None
@@ -336,6 +407,14 @@ class FrankaTeleopAttachRuntime:
         self._home_joint_positions_cache: Optional[np.ndarray] = None
         self._home_joint_targets_available = True
         self._stopped = False
+        self._latest_gripper_width: Optional[float] = None
+        self._gripper_target_width: Optional[float] = None
+        self._gripper_applied_width: Optional[float] = None
+        self._gripper_joint_indices: Optional[Tuple[int, int]] = None
+        self._warned_gripper_joint_missing = False
+        self._ft_selected_attr: dict[str, str] = {}
+        self._warned_ft_unavailable = False
+        self._gripper_contact_latched = False
 
     def _reset_cycle_state(self) -> None:
         self._reset_needed = True
@@ -344,6 +423,9 @@ class FrankaTeleopAttachRuntime:
         self._warned_articulation_init = False
         self._latest_target_pose = None
         self._warned_waiting_home_pose = False
+        self._latest_gripper_width = None
+        self._gripper_target_width = None
+        self._gripper_applied_width = None
 
     def _reset_relative_reference_state(self) -> None:
         self._home_cmd_position = None
@@ -355,6 +437,11 @@ class FrankaTeleopAttachRuntime:
         self._homing_elapsed_s = 0.0
         self._home_joint_positions_cache = None
         self._home_joint_targets_available = True
+        self._gripper_joint_indices = None
+        self._warned_gripper_joint_missing = False
+        self._ft_selected_attr = {}
+        self._warned_ft_unavailable = False
+        self._gripper_contact_latched = False
 
     def start(self) -> None:
         stage = omni.usd.get_context().get_stage()
@@ -403,7 +490,8 @@ class FrankaTeleopAttachRuntime:
         print(
             f"[INFO] Reading teleop pose from OmniGraph attrs (position candidates={self._position_attr_paths}, "
             f"orientation candidates={self._orientation_attr_paths}, "
-            f"pose candidates={self._pose_attr_paths})",
+            f"pose candidates={self._pose_attr_paths}, "
+            f"gripper candidates={self._gripper_attr_paths})",
             flush=True,
         )
         if not ENABLE_TARGET_VISUALIZATION:
@@ -696,12 +784,176 @@ class FrankaTeleopAttachRuntime:
                 return pose
         return None
 
+    def _read_gripper_width_from_omnigraph(self) -> Optional[float]:
+        for attr_path in self._gripper_attr_paths:
+            raw_val = _read_og_attr(attr_path)
+            width = _extract_gripper_width(raw_val)
+            if width is not None:
+                return width
+        return None
+
+    def _get_gripper_joint_indices(self) -> Optional[Tuple[int, int]]:
+        if self._gripper_joint_indices is not None:
+            return self._gripper_joint_indices
+        if self._fr3 is None:
+            return None
+        dof_names = getattr(self._fr3, "dof_names", None)
+        if not isinstance(dof_names, Sequence):
+            return None
+        try:
+            idx1 = list(dof_names).index(GRIPPER_JOINT_NAMES[0])
+            idx2 = list(dof_names).index(GRIPPER_JOINT_NAMES[1])
+            self._gripper_joint_indices = (int(idx1), int(idx2))
+            return self._gripper_joint_indices
+        except Exception:
+            if not self._warned_gripper_joint_missing:
+                print(
+                    f"[WARN] Gripper joints {GRIPPER_JOINT_NAMES} not found in articulation DOFs.",
+                    flush=True,
+                )
+                self._warned_gripper_joint_missing = True
+            return None
+
+    def _apply_gripper_width(self, width: float) -> None:
+        if self._fr3 is None:
+            return
+        indices = self._get_gripper_joint_indices()
+        if indices is None:
+            return
+        target = float(np.clip(width, GRIPPER_MIN_POS, GRIPPER_MAX_POS))
+        try:
+            joint_positions = np.asarray(self._fr3.get_joint_positions(), dtype=np.float64).reshape(-1)
+            if joint_positions.size <= max(indices):
+                return
+            joint_positions[indices[0]] = target
+            joint_positions[indices[1]] = target
+            self._fr3.set_joint_positions(joint_positions)
+        except Exception as exc:
+            print(f"[WARN] Failed to apply gripper command {target:.3f}: {exc}", flush=True)
+
+    @staticmethod
+    def _force_value_to_scalar(value: Any) -> Optional[float]:
+        if value is None:
+            return None
+        try:
+            scalar = float(value)
+            return abs(scalar) if math.isfinite(scalar) else None
+        except Exception:
+            pass
+        if all(hasattr(value, a) for a in ("x", "y", "z")):
+            try:
+                vec = np.asarray([float(value.x), float(value.y), float(value.z)], dtype=np.float64)
+                n = float(np.linalg.norm(vec))
+                return n if math.isfinite(n) else None
+            except Exception:
+                return None
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) >= 1:
+            try:
+                arr = np.asarray([float(v) for v in value], dtype=np.float64).reshape(-1)
+                n = float(np.linalg.norm(arr))
+                return n if math.isfinite(n) else None
+            except Exception:
+                return None
+        return None
+
+    def _read_ft_force_scalar(self, prim_path: str) -> Optional[float]:
+        stage = omni.usd.get_context().get_stage()
+        if stage is None:
+            return None
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return None
+
+        selected = self._ft_selected_attr.get(prim_path)
+        attr_names = [selected] if selected else []
+        attr_names.extend([name for name in FT_FORCE_ATTR_CANDIDATES if name != selected])
+        for attr_name in attr_names:
+            if not attr_name:
+                continue
+            try:
+                attr = prim.GetAttribute(attr_name)
+                if not attr or not attr.IsValid():
+                    continue
+                force_val = self._force_value_to_scalar(attr.Get())
+                if force_val is None:
+                    continue
+                self._ft_selected_attr[prim_path] = attr_name
+                return force_val
+            except Exception:
+                continue
+        return None
+
+    def _read_gripper_contact_force(self) -> Optional[float]:
+        left = self._read_ft_force_scalar(LEFT_FT_JOINT_PRIM_PATH)
+        right = self._read_ft_force_scalar(RIGHT_FT_JOINT_PRIM_PATH)
+        vals = [v for v in (left, right) if v is not None]
+        if not vals:
+            if not self._warned_ft_unavailable:
+                print(
+                    "[WARN] Could not read fingertip FT force values from configured prim paths.",
+                    flush=True,
+                )
+                self._warned_ft_unavailable = True
+            return None
+        return max(vals)
+
+    def _read_current_gripper_width(self) -> Optional[float]:
+        if self._fr3 is None:
+            return None
+        indices = self._get_gripper_joint_indices()
+        if indices is None:
+            return None
+        try:
+            joint_positions = np.asarray(self._fr3.get_joint_positions(), dtype=np.float64).reshape(-1)
+            if joint_positions.size <= max(indices):
+                return None
+            return float(0.5 * (joint_positions[indices[0]] + joint_positions[indices[1]]))
+        except Exception:
+            return None
+
+    def _update_gripper_smooth(self, dt: float) -> None:
+        if self._latest_gripper_width is not None:
+            self._gripper_target_width = float(np.clip(self._latest_gripper_width, GRIPPER_MIN_POS, GRIPPER_MAX_POS))
+        if self._gripper_target_width is None:
+            return
+
+        if self._gripper_applied_width is None:
+            current_width = self._read_current_gripper_width()
+            self._gripper_applied_width = (
+                current_width if current_width is not None else self._gripper_target_width
+            )
+
+        contact_force = self._read_gripper_contact_force()
+        closing_requested = self._gripper_target_width < (self._gripper_applied_width - 1e-6)
+        opening_requested = self._gripper_target_width > (self._gripper_applied_width + 1e-6)
+
+        if opening_requested:
+            self._gripper_contact_latched = False
+        elif (
+            closing_requested
+            and contact_force is not None
+            and contact_force >= float(GRIPPER_CONTACT_FORCE_THRESHOLD)
+        ):
+            self._gripper_contact_latched = True
+
+        if self._gripper_contact_latched and closing_requested:
+            self._gripper_target_width = self._gripper_applied_width
+
+        max_step = float(GRIPPER_MAX_SPEED) * float(max(dt, 1e-6))
+        error = self._gripper_target_width - self._gripper_applied_width
+        step = float(np.clip(error, -max_step, max_step))
+        self._gripper_applied_width += step
+        self._apply_gripper_width(self._gripper_applied_width)
+
     def _on_update(self, event: Any) -> None:
         del event
         timeline = omni.timeline.get_timeline_interface()
         if not timeline.is_playing():
             return
         self._latest_target_pose = self._read_target_pose_from_omnigraph()
+        gripper_width = self._read_gripper_width_from_omnigraph()
+        if gripper_width is not None:
+            self._latest_gripper_width = gripper_width
 
     def _set_target_world_pose(self, position: Sequence[float], orientation_wxyz: Sequence[float]) -> None:
         if self._disable_target_updates or self._target is None:
@@ -756,6 +1008,8 @@ class FrankaTeleopAttachRuntime:
 
         if not self._run_startup_homing(dt):
             return
+
+        self._update_gripper_smooth(dt)
 
         pose = self._latest_target_pose
         if pose is None:
