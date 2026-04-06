@@ -16,12 +16,12 @@ import numpy as np
 # the script is executed outside a running Isaac Sim process.
 og = None
 omni = None
-mg = None
 Usd = None
 UsdGeom = None
 World = None
 SingleArticulation = None
 XFormPrim = None
+ArticulationAction = None
 create_prim = None
 is_prim_path_valid = None
 
@@ -38,13 +38,29 @@ ACTION_GRAPH_PATH = "/Root/eef_pose_sub"
 ROS2_SUBSCRIBE_POSE_NODE_NAME = "ros2_subscribe_eef_pose"
 GRIPPER_ACTION_GRAPH_PATH = "/Root/gripper_controller"
 ROS2_SUBSCRIBE_GRIPPER_NODE_NAME = "ros2_subscribe_gripper_command"
-RMPFLOW_ROBOT_NAME = "FR3"
+DIFF_IK_METHOD = "dls"  # "dls", "pinv", or "transpose"
+DIFF_IK_DAMPING = 0.05
+DIFF_IK_POSITION_GAIN = 1.0
+DIFF_IK_ORIENTATION_GAIN = 1.0
 
 # Relative teleop mapping:
 # commanded_pose = home_pose (+) delta(input_pose relative to first received pose)
 USE_RELATIVE_INPUT = True
 EE_HOME_REFERENCE_PRIM_PATH = "/Root/fr3_ft/fr3/fr3_hand_tcp"
 EE_HOME_REFERENCE_PRIM_FALLBACK_PATHS = []
+DIFF_IK_EE_PRIM_CANDIDATES = [
+    EE_HOME_REFERENCE_PRIM_PATH,
+    "/Root/fr3_ft/fr3/fr3_link8",
+    "/Root/fr3_ft/fr3/fr3_hand",
+    "/Root/fr3_ft/fr3/fr3_link7",
+]
+DIFF_IK_EE_BODY_CANDIDATES = [
+    "fr3_hand_tcp",
+    "fr3_link8",
+    "fr3_hand",
+    "fr3_link7",
+]
+ARM_JOINT_NAME_CANDIDATES = tuple(f"fr3_joint{i}" for i in range(1, 8))
 POSITION_DELTA_SCALE = 3.0
 TRANSLATION_MAPPING_MODE = "world_delta"  # "world_delta" (default) or "local_delta"
 # Orientation mapping options:
@@ -107,18 +123,18 @@ FT_FORCE_ATTR_CANDIDATES = [
 
 
 def _ensure_isaac_imports() -> None:
-    global og, omni, mg, Usd, UsdGeom, World, SingleArticulation, XFormPrim, create_prim, is_prim_path_valid
+    global og, omni, Usd, UsdGeom, World, SingleArticulation, XFormPrim, ArticulationAction, create_prim, is_prim_path_valid
     if og is not None:
         return
     try:
         import omni as _omni
         import omni.graph.core as _og
-        import isaacsim.robot_motion.motion_generation as _mg
         from pxr import Usd as _Usd
         from pxr import UsdGeom as _UsdGeom
         from isaacsim.core.api import World as _World
         from isaacsim.core.prims import SingleArticulation as _SingleArticulation
         from isaacsim.core.prims import XFormPrim as _XFormPrim
+        from isaacsim.core.utils.types import ArticulationAction as _ArticulationAction
         from isaacsim.core.utils.prims import create_prim as _create_prim
         from isaacsim.core.utils.prims import is_prim_path_valid as _is_prim_path_valid
     except Exception as exc:
@@ -130,44 +146,108 @@ def _ensure_isaac_imports() -> None:
 
     omni = _omni
     og = _og
-    mg = _mg
     Usd = _Usd
     UsdGeom = _UsdGeom
     World = _World
     SingleArticulation = _SingleArticulation
     XFormPrim = _XFormPrim
+    ArticulationAction = _ArticulationAction
     create_prim = _create_prim
     is_prim_path_valid = _is_prim_path_valid
 
 
-class FR3RmpFlowController:
+class FR3DifferentialIKController:
     def __init__(self, name: str, robot_articulation: Any, physics_dt: float = 1.0 / 60.0) -> None:
-        cfg = mg.interface_config_loader.load_supported_motion_policy_config(RMPFLOW_ROBOT_NAME, "RMPflow")
-        if cfg is None:
-            raise RuntimeError(
-                f"Failed to load RMPflow config for robot '{RMPFLOW_ROBOT_NAME}'. "
-                "Check motion policy support in Isaac Sim."
-            )
-        self._motion_policy = mg.lula.motion_policies.RmpFlow(**cfg)
-        self._articulation_motion_policy = mg.ArticulationMotionPolicy(
-            robot_articulation, self._motion_policy, physics_dt
-        )
-        self._controller = mg.MotionPolicyController(name=name, articulation_motion_policy=self._articulation_motion_policy)
+        del name, physics_dt
         self._robot_articulation = robot_articulation
-        self._set_base_pose_from_articulation()
-
-    def _set_base_pose_from_articulation(self) -> None:
-        base_pos, base_ori = self._robot_articulation.get_world_pose()
-        self._motion_policy.set_robot_base_pose(robot_position=base_pos, robot_orientation=base_ori)
+        self._arm_joint_indices: Optional[np.ndarray] = None
+        self._ee_body_index: Optional[int] = None
+        self._joint_lower_limits: Optional[np.ndarray] = None
+        self._joint_upper_limits: Optional[np.ndarray] = None
+        self._ee_prim_path: Optional[str] = None
 
     def reset(self) -> None:
-        self._controller.reset()
-        self._set_base_pose_from_articulation()
+        self._arm_joint_indices = None
+        self._ee_body_index = None
+        self._joint_lower_limits = None
+        self._joint_upper_limits = None
+        self._ee_prim_path = None
+
+    def _ensure_initialized(self) -> None:
+        if self._arm_joint_indices is not None and self._ee_body_index is not None and self._ee_prim_path is not None:
+            return
+
+        dof_names = list(getattr(self._robot_articulation, "dof_names", []) or [])
+        if not dof_names:
+            raise RuntimeError("Differential IK controller could not resolve articulation DOF names.")
+        self._arm_joint_indices = np.asarray(
+            [dof_names.index(joint_name) for joint_name in ARM_JOINT_NAME_CANDIDATES],
+            dtype=np.int64,
+        )
+
+        dof_props = getattr(self._robot_articulation, "dof_properties", None)
+        if dof_props is not None:
+            self._joint_lower_limits = np.asarray(dof_props["lower"], dtype=np.float64)[self._arm_joint_indices]
+            self._joint_upper_limits = np.asarray(dof_props["upper"], dtype=np.float64)[self._arm_joint_indices]
+
+        articulation_view = getattr(self._robot_articulation, "_articulation_view", None)
+        if articulation_view is None:
+            raise RuntimeError("Differential IK controller could not access articulation view for Jacobians.")
+
+        available_body_names = set(getattr(articulation_view, "body_names", []) or [])
+        for body_name in DIFF_IK_EE_BODY_CANDIDATES:
+            if body_name in available_body_names:
+                self._ee_body_index = int(articulation_view.get_body_index(body_name))
+                break
+        if self._ee_body_index is None:
+            raise RuntimeError(
+                f"Differential IK controller could not resolve an end-effector body. Available bodies: {sorted(available_body_names)}"
+            )
+
+        for prim_path in DIFF_IK_EE_PRIM_CANDIDATES:
+            if is_prim_path_valid(prim_path):
+                self._ee_prim_path = prim_path
+                break
+        if self._ee_prim_path is None:
+            raise RuntimeError(
+                f"Differential IK controller could not resolve an end-effector prim from {DIFF_IK_EE_PRIM_CANDIDATES}."
+            )
 
     def forward(self, target_end_effector_position: np.ndarray, target_end_effector_orientation: np.ndarray):
-        return self._controller.forward(
-            target_end_effector_position=target_end_effector_position,
-            target_end_effector_orientation=target_end_effector_orientation,
+        self._ensure_initialized()
+
+        current_joint_positions = np.asarray(self._robot_articulation.get_joint_positions(), dtype=np.float64).reshape(-1)
+        arm_joint_positions = current_joint_positions[self._arm_joint_indices]
+
+        jacobians = np.asarray(self._robot_articulation._articulation_view.get_jacobians(), dtype=np.float64)
+        ee_jacobian = jacobians[0, self._ee_body_index - 1, :, self._arm_joint_indices]
+
+        current_ee_position, current_ee_orientation = _get_prim_world_pose(self._ee_prim_path)
+        if current_ee_position is None or current_ee_orientation is None:
+            raise RuntimeError(f"Failed to read end-effector pose from '{self._ee_prim_path}'.")
+
+        task_error = _compute_diff_ik_error(
+            current_position=current_ee_position,
+            current_orientation=current_ee_orientation,
+            goal_position=np.asarray(target_end_effector_position, dtype=np.float64),
+            goal_orientation=(
+                None
+                if target_end_effector_orientation is None
+                else _quat_normalize_wxyz(np.asarray(target_end_effector_orientation, dtype=np.float64))
+            ),
+        )
+        if target_end_effector_orientation is None:
+            ee_jacobian = ee_jacobian[:3, :]
+
+        delta_joint_positions = _solve_diff_ik_delta(ee_jacobian, task_error)
+        joint_position_targets = arm_joint_positions + delta_joint_positions
+
+        if self._joint_lower_limits is not None and self._joint_upper_limits is not None:
+            joint_position_targets = np.clip(joint_position_targets, self._joint_lower_limits, self._joint_upper_limits)
+
+        return ArticulationAction(
+            joint_positions=np.asarray(joint_position_targets, dtype=np.float32),
+            joint_indices=np.asarray(self._arm_joint_indices, dtype=np.int32),
         )
 
 
@@ -245,6 +325,77 @@ def _quat_to_rotmat_wxyz(q: Sequence[float]) -> np.ndarray:
         ],
         dtype=np.float64,
     )
+
+
+def _quat_error_as_rotvec_wxyz(goal: Sequence[float], current: Sequence[float]) -> np.ndarray:
+    q_err = _quat_normalize_wxyz(_quat_mul_wxyz(goal, _quat_conj_wxyz(current)))
+    if float(q_err[0]) < 0.0:
+        q_err = -q_err
+    vec = np.asarray(q_err[1:], dtype=np.float64)
+    vec_norm = float(np.linalg.norm(vec))
+    if vec_norm < 1e-9:
+        return np.zeros(3, dtype=np.float64)
+    angle = 2.0 * math.atan2(vec_norm, float(q_err[0]))
+    return (angle / vec_norm) * vec
+
+
+def _compute_diff_ik_error(
+    current_position: np.ndarray,
+    current_orientation: np.ndarray,
+    goal_position: np.ndarray,
+    goal_orientation: Optional[np.ndarray],
+) -> np.ndarray:
+    position_error = float(DIFF_IK_POSITION_GAIN) * (
+        np.asarray(goal_position, dtype=np.float64) - np.asarray(current_position, dtype=np.float64)
+    )
+    if goal_orientation is None:
+        return position_error
+    orientation_error = float(DIFF_IK_ORIENTATION_GAIN) * _quat_error_as_rotvec_wxyz(
+        np.asarray(goal_orientation, dtype=np.float64),
+        np.asarray(current_orientation, dtype=np.float64),
+    )
+    return np.concatenate([position_error, orientation_error], axis=0)
+
+
+def _solve_diff_ik_delta(jacobian: np.ndarray, task_error: np.ndarray) -> np.ndarray:
+    jacobian = np.asarray(jacobian, dtype=np.float64)
+    task_error = np.asarray(task_error, dtype=np.float64).reshape(-1, 1)
+    if DIFF_IK_METHOD == "pinv":
+        return (np.linalg.pinv(jacobian) @ task_error).reshape(-1)
+    if DIFF_IK_METHOD == "transpose":
+        return (jacobian.T @ task_error).reshape(-1)
+    transpose = jacobian.T
+    damping = float(DIFF_IK_DAMPING)
+    lambda_matrix = np.eye(jacobian.shape[0], dtype=np.float64) * (damping**2)
+    return (transpose @ np.linalg.inv(jacobian @ transpose + lambda_matrix) @ task_error).reshape(-1)
+
+
+def _get_prim_world_pose(prim_path: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        return None, None
+    try:
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            return None, None
+        world_mtx = UsdGeom.Xformable(prim).ComputeLocalToWorldTransform(Usd.TimeCode.Default())
+        translation = world_mtx.ExtractTranslation()
+        rotation = world_mtx.ExtractRotationQuat()
+        position = np.asarray([float(translation[0]), float(translation[1]), float(translation[2])], dtype=np.float64)
+        orientation = _quat_normalize_wxyz(
+            np.asarray(
+                [
+                    float(rotation.GetReal()),
+                    float(rotation.GetImaginary()[0]),
+                    float(rotation.GetImaginary()[1]),
+                    float(rotation.GetImaginary()[2]),
+                ],
+                dtype=np.float64,
+            )
+        )
+        return position, orientation
+    except Exception:
+        return None, None
 
 
 def _as_wxyz(value: Any) -> Optional[list[float]]:
@@ -467,7 +618,10 @@ class FrankaTeleopAttachRuntime:
 
         run_tag = uuid.uuid4().hex[:8]
         self._fr3 = self._world.scene.add(SingleArticulation(prim_path=ROBOT_PRIM_PATH, name=f"fr3_ctrl_{run_tag}"))
-        self._controller = FR3RmpFlowController(name=f"fr3_rmpflow_{run_tag}", robot_articulation=self._fr3)
+        self._controller = FR3DifferentialIKController(
+            name=f"fr3_diff_ik_{run_tag}",
+            robot_articulation=self._fr3,
+        )
 
         if ENABLE_TARGET_VISUALIZATION:
             try:
