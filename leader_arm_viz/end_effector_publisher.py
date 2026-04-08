@@ -1,9 +1,48 @@
 import rclpy
+import numpy as np
 from rclpy.node import Node
 from tf2_ros import Buffer, TransformListener
 from geometry_msgs.msg import PoseStamped
 from std_msgs.msg import Float64MultiArray
 from tf_transformations import quaternion_matrix
+
+VALID_POS_DELTA_THRESHOLD = 0.02 # meter
+VALID_ROT_DELTA_THRESHOLD = 0.05 # radian (=3 degrees)
+MIN_POS_DELTA_THRESHOLD = 0.003 # 3 mm
+MIN_ROT_DELTA_THRESHOLD = np.deg2rad(0.5)
+
+""" HELPER FUNCTIONS """
+
+
+def _position_to_array(pose_stamped: PoseStamped) -> np.ndarray:
+    return np.array(
+        [
+            pose_stamped.pose.position.x,
+            pose_stamped.pose.position.y,
+            pose_stamped.pose.position.z,
+        ],
+        dtype=np.float64,
+    )
+
+
+def _quaternion_to_array(pose_stamped: PoseStamped) -> np.ndarray:
+    quat = np.array(
+        [
+            pose_stamped.pose.orientation.x,
+            pose_stamped.pose.orientation.y,
+            pose_stamped.pose.orientation.z,
+            pose_stamped.pose.orientation.w,
+        ],
+        dtype=np.float64,
+    )
+    norm = np.linalg.norm(quat)
+    if norm == 0.0:
+        raise ValueError("Received zero-norm quaternion in pose filter")
+    return quat / norm
+
+
+""" HELPER FUNCTIONS ENDS """
+
 
 class EEFPoseReader(Node):
     def __init__(self):
@@ -37,12 +76,46 @@ class EEFPoseReader(Node):
             msg.pose.position.z = t.z
             msg.pose.orientation = q
 
-            self.last_pose = msg
-            self.last_transform = transform
-            self.eef_pub.publish(msg)
+            result = self.pose_filter(msg, self.last_pose)
+
+            # only publish if pose data passes filter
+            if result is not None:
+                self.last_pose = result
+                self.last_transform = transform
+                self.eef_pub.publish(result)
 
         except Exception as e:
             self.get_logger().warn(f"TF lookup failed: {e}")
+
+    def pose_filter(self, new_pose: PoseStamped, last_pose: PoseStamped | None):
+        """Add filter for noise and deadband"""
+        if last_pose is None:
+            return new_pose
+
+        # Calculate the Euclidean distance change
+        new_pos = _position_to_array(new_pose)
+        last_pos = _position_to_array(last_pose)
+        dp = new_pos - last_pos
+        dist = np.linalg.norm(dp)
+
+        # Calculate total angle change
+        new_quat = _quaternion_to_array(new_pose)
+        last_quat = _quaternion_to_array(last_pose)
+        dot = np.dot(new_quat, last_quat)
+        dot = np.clip(dot, -1.0, 1.0)  # safety
+        angle = 2 * np.arccos(abs(dot))  # radian
+
+        # filter noise and huge spikes
+        if dist > VALID_POS_DELTA_THRESHOLD:
+            return None
+        if angle > VALID_ROT_DELTA_THRESHOLD:
+            return None
+
+        # deadband filter, suppress command with too small of a change
+        if dist < MIN_POS_DELTA_THRESHOLD and angle < MIN_ROT_DELTA_THRESHOLD:
+            return None
+
+        return new_pose
 
     def publish_tf_matrix(self):
         """Publish the 4x4 transform matrix at a slower rate for consumers that need it once in a while."""
