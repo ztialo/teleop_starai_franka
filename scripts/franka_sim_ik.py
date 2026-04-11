@@ -114,6 +114,7 @@ LEFT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft/fr3/fr3_left_ft/fr3_gripper_left_ft"
 RIGHT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft/fr3/fr3_right_ft/fr3_gripper_right_ft"
 GRIPPER_CONTACT_FORCE_THRESHOLD = 2.0
 FT_FORCE_ATTR_CANDIDATES = [
+    "body_incoming_joint_wrench_b",
     "state:normalForce",
     "state:force",
     "state:linearForce",
@@ -221,6 +222,11 @@ class FR3DifferentialIKController:
 
         jacobians = np.asarray(self._robot_articulation._articulation_view.get_jacobians(), dtype=np.float64)
         ee_jacobian = jacobians[0, self._ee_body_index - 1, :, self._arm_joint_indices]
+        ee_jacobian = _normalize_diff_ik_jacobian(
+            ee_jacobian,
+            expected_task_dim=6,
+            expected_joint_dim=int(self._arm_joint_indices.size),
+        )
 
         current_ee_position, current_ee_orientation = _get_prim_world_pose(self._ee_prim_path)
         if current_ee_position is None or current_ee_orientation is None:
@@ -249,6 +255,29 @@ class FR3DifferentialIKController:
             joint_positions=np.asarray(joint_position_targets, dtype=np.float32),
             joint_indices=np.asarray(self._arm_joint_indices, dtype=np.int32),
         )
+
+
+def _normalize_diff_ik_jacobian(
+    jacobian: np.ndarray,
+    expected_task_dim: int,
+    expected_joint_dim: int,
+) -> np.ndarray:
+    jacobian = np.asarray(jacobian, dtype=np.float64)
+    if jacobian.ndim != 2:
+        raise RuntimeError(
+            f"Differential IK expected a 2D Jacobian, got shape {jacobian.shape}."
+        )
+
+    if jacobian.shape == (expected_task_dim, expected_joint_dim):
+        return jacobian
+    if jacobian.shape == (expected_joint_dim, expected_task_dim):
+        return jacobian.T
+
+    raise RuntimeError(
+        "Differential IK received an unexpected Jacobian shape "
+        f"{jacobian.shape}; expected ({expected_task_dim}, {expected_joint_dim}) "
+        f"or ({expected_joint_dim}, {expected_task_dim})."
+    )
 
 
 def _as_xyz(value: Any) -> Optional[list[float]]:
@@ -1006,9 +1035,26 @@ class FrankaTeleopAttachRuntime:
                 return n if math.isfinite(n) else None
             except Exception:
                 return None
+        for force_attr in ("force", "linear", "linear_force"):
+            force_value = getattr(value, force_attr, None)
+            if force_value is not None:
+                scalar = FrankaTeleopAttachRuntime._force_value_to_scalar(force_value)
+                if scalar is not None:
+                    return scalar
+        for getter_name in ("GetForce", "GetLinear"):
+            getter = getattr(value, getter_name, None)
+            if callable(getter):
+                try:
+                    scalar = FrankaTeleopAttachRuntime._force_value_to_scalar(getter())
+                except Exception:
+                    scalar = None
+                if scalar is not None:
+                    return scalar
         if isinstance(value, Sequence) and not isinstance(value, (str, bytes)) and len(value) >= 1:
             try:
                 arr = np.asarray([float(v) for v in value], dtype=np.float64).reshape(-1)
+                if arr.size >= 6:
+                    arr = arr[:3]
                 n = float(np.linalg.norm(arr))
                 return n if math.isfinite(n) else None
             except Exception:

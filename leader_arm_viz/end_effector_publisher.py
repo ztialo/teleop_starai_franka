@@ -53,9 +53,10 @@ class EEFPoseReader(Node):
 
         self.timer = self.create_timer(0.1, self.read_publish_pose) # 10 Hz
         self.eef_pub = self.create_publisher(PoseStamped, '/eef_pose', 10)
+        self.eef_filtered_pub = self.create_publisher(PoseStamped, '/eef_pose_filtered', 10)
         self.tf_mat_pub = self.create_publisher(Float64MultiArray, '/eef_tf_matrix', 10)
         self.tf_matrix_timer = self.create_timer(1.0, self.publish_tf_matrix)  # slow timer
-        self.last_pose: PoseStamped | None = None
+        self.last_filtered_pose: PoseStamped | None = None
         self.last_transform = None
 
     def read_publish_pose(self):
@@ -76,13 +77,13 @@ class EEFPoseReader(Node):
             msg.pose.position.z = t.z
             msg.pose.orientation = q
 
-            result = self.pose_filter(msg, self.last_pose)
+            self.last_transform = transform
+            self.eef_pub.publish(msg)
 
-            # only publish if pose data passes filter
-            if result is not None:
-                self.last_pose = result
-                self.last_transform = transform
-                self.eef_pub.publish(result)
+            filtered = self.pose_filter(msg, self.last_filtered_pose)
+            if filtered is not None:
+                self.last_filtered_pose = filtered
+                self.eef_filtered_pub.publish(filtered)
 
         except Exception as e:
             self.get_logger().warn(f"TF lookup failed: {e}")
