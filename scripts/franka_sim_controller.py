@@ -42,6 +42,11 @@ DIFF_IK_METHOD = "dls"  # "dls", "pinv", or "transpose"
 DIFF_IK_DAMPING = 0.05
 DIFF_IK_POSITION_GAIN = 1.0
 DIFF_IK_ORIENTATION_GAIN = 1.0
+DIFF_IK_STEP_GAIN = 0.15
+DIFF_IK_MAX_JOINT_STEP = 0.03  # rad per physics step
+DIFF_IK_MAX_POSITION_ERROR = 0.08  # meters
+DIFF_IK_MAX_ORIENTATION_ERROR = 0.6  # radians (rotvec norm)
+_DIFF_IK_SHAPE_WARNING_PRINTED = False
 
 # Relative teleop mapping:
 # commanded_pose = home_pose (+) delta(input_pose relative to first received pose)
@@ -165,6 +170,7 @@ class FR3DifferentialIKController:
         self._joint_lower_limits: Optional[np.ndarray] = None
         self._joint_upper_limits: Optional[np.ndarray] = None
         self._ee_prim_path: Optional[str] = None
+        self._warned_joint_dim_mismatch = False
 
     def reset(self) -> None:
         self._arm_joint_indices = None
@@ -172,6 +178,7 @@ class FR3DifferentialIKController:
         self._joint_lower_limits = None
         self._joint_upper_limits = None
         self._ee_prim_path = None
+        self._warned_joint_dim_mismatch = False
 
     def _ensure_initialized(self) -> None:
         if self._arm_joint_indices is not None and self._ee_body_index is not None and self._ee_prim_path is not None:
@@ -217,7 +224,8 @@ class FR3DifferentialIKController:
         self._ensure_initialized()
 
         current_joint_positions = np.asarray(self._robot_articulation.get_joint_positions(), dtype=np.float64).reshape(-1)
-        arm_joint_positions = current_joint_positions[self._arm_joint_indices]
+        action_joint_indices = np.asarray(self._arm_joint_indices, dtype=np.int64)
+        arm_joint_positions = current_joint_positions[action_joint_indices]
 
         jacobians = np.asarray(self._robot_articulation._articulation_view.get_jacobians(), dtype=np.float64)
         ee_jacobian = jacobians[0, self._ee_body_index - 1, :, self._arm_joint_indices]
@@ -239,15 +247,33 @@ class FR3DifferentialIKController:
         if target_end_effector_orientation is None:
             ee_jacobian = ee_jacobian[:3, :]
 
+        jac_cols = int(np.asarray(ee_jacobian).shape[1])
+        arm_dim = int(arm_joint_positions.shape[0])
+        if jac_cols != arm_dim:
+            common_dim = min(jac_cols, arm_dim)
+            if not self._warned_joint_dim_mismatch:
+                print(
+                    f"[WARN] Diff-IK joint-dimension mismatch (jacobian cols={jac_cols}, "
+                    f"arm joints={arm_dim}). Using first {common_dim} joints for IK action.",
+                    flush=True,
+                )
+                self._warned_joint_dim_mismatch = True
+            ee_jacobian = ee_jacobian[:, :common_dim]
+            arm_joint_positions = arm_joint_positions[:common_dim]
+            action_joint_indices = action_joint_indices[:common_dim]
+
+        ee_jacobian, task_error = _align_diff_ik_inputs(ee_jacobian, task_error)
         delta_joint_positions = _solve_diff_ik_delta(ee_jacobian, task_error)
         joint_position_targets = arm_joint_positions + delta_joint_positions
 
         if self._joint_lower_limits is not None and self._joint_upper_limits is not None:
-            joint_position_targets = np.clip(joint_position_targets, self._joint_lower_limits, self._joint_upper_limits)
+            lower = np.asarray(self._joint_lower_limits, dtype=np.float64).reshape(-1)[: joint_position_targets.shape[0]]
+            upper = np.asarray(self._joint_upper_limits, dtype=np.float64).reshape(-1)[: joint_position_targets.shape[0]]
+            joint_position_targets = np.clip(joint_position_targets, lower, upper)
 
         return ArticulationAction(
             joint_positions=np.asarray(joint_position_targets, dtype=np.float32),
-            joint_indices=np.asarray(self._arm_joint_indices, dtype=np.int32),
+            joint_indices=np.asarray(action_joint_indices, dtype=np.int32),
         )
 
 
@@ -348,26 +374,78 @@ def _compute_diff_ik_error(
     position_error = float(DIFF_IK_POSITION_GAIN) * (
         np.asarray(goal_position, dtype=np.float64) - np.asarray(current_position, dtype=np.float64)
     )
+    pos_err_norm = float(np.linalg.norm(position_error))
+    if pos_err_norm > float(DIFF_IK_MAX_POSITION_ERROR) and pos_err_norm > 1e-9:
+        position_error = position_error * (float(DIFF_IK_MAX_POSITION_ERROR) / pos_err_norm)
     if goal_orientation is None:
         return position_error
     orientation_error = float(DIFF_IK_ORIENTATION_GAIN) * _quat_error_as_rotvec_wxyz(
         np.asarray(goal_orientation, dtype=np.float64),
         np.asarray(current_orientation, dtype=np.float64),
     )
+    ori_err_norm = float(np.linalg.norm(orientation_error))
+    if ori_err_norm > float(DIFF_IK_MAX_ORIENTATION_ERROR) and ori_err_norm > 1e-9:
+        orientation_error = orientation_error * (float(DIFF_IK_MAX_ORIENTATION_ERROR) / ori_err_norm)
     return np.concatenate([position_error, orientation_error], axis=0)
 
 
 def _solve_diff_ik_delta(jacobian: np.ndarray, task_error: np.ndarray) -> np.ndarray:
     jacobian = np.asarray(jacobian, dtype=np.float64)
     task_error = np.asarray(task_error, dtype=np.float64).reshape(-1, 1)
+    if float(np.linalg.norm(task_error)) < 1e-8:
+        return np.zeros((jacobian.shape[1],), dtype=np.float64)
+
     if DIFF_IK_METHOD == "pinv":
-        return (np.linalg.pinv(jacobian) @ task_error).reshape(-1)
-    if DIFF_IK_METHOD == "transpose":
-        return (jacobian.T @ task_error).reshape(-1)
-    transpose = jacobian.T
-    damping = float(DIFF_IK_DAMPING)
-    lambda_matrix = np.eye(jacobian.shape[0], dtype=np.float64) * (damping**2)
-    return (transpose @ np.linalg.inv(jacobian @ transpose + lambda_matrix) @ task_error).reshape(-1)
+        delta = (np.linalg.pinv(jacobian) @ task_error).reshape(-1)
+    elif DIFF_IK_METHOD == "transpose":
+        delta = (jacobian.T @ task_error).reshape(-1)
+    else:
+        transpose = jacobian.T
+        damping = float(DIFF_IK_DAMPING)
+        lambda_matrix = np.eye(jacobian.shape[0], dtype=np.float64) * (damping**2)
+        delta = (transpose @ np.linalg.inv(jacobian @ transpose + lambda_matrix) @ task_error).reshape(-1)
+
+    delta = float(DIFF_IK_STEP_GAIN) * delta
+    max_step = float(max(DIFF_IK_MAX_JOINT_STEP, 1e-6))
+    delta = np.clip(delta, -max_step, max_step)
+    return delta
+
+
+def _align_diff_ik_inputs(jacobian: np.ndarray, task_error: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Make Jacobian row count and task-error length consistent."""
+    global _DIFF_IK_SHAPE_WARNING_PRINTED
+    jac = np.asarray(jacobian, dtype=np.float64)
+    err = np.asarray(task_error, dtype=np.float64).reshape(-1)
+    if jac.ndim != 2:
+        raise RuntimeError(f"Expected 2D Jacobian, got shape {jac.shape}.")
+
+    jac_rows = int(jac.shape[0])
+    err_rows = int(err.shape[0])
+    if jac_rows == err_rows:
+        return jac, err
+
+    # Isaac variants may return a 7-row EE Jacobian while this controller uses a
+    # 6D task error (xyz + rotvec). Keep the first 6 rows in that case.
+    if jac_rows == 7 and err_rows == 6:
+        if not _DIFF_IK_SHAPE_WARNING_PRINTED:
+            print(
+                "[WARN] Diff-IK shape mismatch (jacobian rows=7, task_error=6). "
+                "Using first 6 Jacobian rows to match task space.",
+                flush=True,
+            )
+            _DIFF_IK_SHAPE_WARNING_PRINTED = True
+        return jac[:6, :], err
+
+    # Fallback: trim the larger side so matrix dimensions remain valid.
+    common_rows = min(jac_rows, err_rows)
+    if not _DIFF_IK_SHAPE_WARNING_PRINTED:
+        print(
+            f"[WARN] Diff-IK shape mismatch (jacobian rows={jac_rows}, task_error={err_rows}). "
+            f"Trimming to {common_rows} rows.",
+            flush=True,
+        )
+        _DIFF_IK_SHAPE_WARNING_PRINTED = True
+    return jac[:common_rows, :], err[:common_rows]
 
 
 def _get_prim_world_pose(prim_path: str) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
