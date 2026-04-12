@@ -7,7 +7,10 @@ It does not import or use rclpy.
 
 from __future__ import annotations
 
+import csv
 import math
+from datetime import datetime, timezone
+from pathlib import Path
 import uuid
 from typing import Any, Optional, Sequence, Tuple
 import numpy as np
@@ -16,6 +19,8 @@ import numpy as np
 # the script is executed outside a running Isaac Sim process.
 og = None
 omni = None
+carb = None
+omni_appwindow = None
 Usd = None
 UsdGeom = None
 World = None
@@ -31,6 +36,9 @@ ROBOT_PRIM_PATH = "/Root/fr3_ft/fr3"
 TARGET_PRIM_PATH = "/World/rmp_target"
 TARGET_INITIAL_POSITION = [0.45, 0.0, 0.45]
 ENABLE_TARGET_VISUALIZATION = False
+KEYBOARD_TARGET_PRIM_PATH = "/Root/target"
+REPO_ROOT = Path("/home/zdli/Projects/ros2_ws/src/teleop_starai_franka")
+LOG_DIR = REPO_ROOT / "log"
 
 # OmniGraph ROS subscribe node configuration.
 # Edit these paths if your Action Graph/node names or output attribute names differ.
@@ -110,6 +118,10 @@ GRIPPER_JOINT_NAMES = ("fr3_finger_joint1", "fr3_finger_joint2")
 GRIPPER_MIN_POS = 0.0
 GRIPPER_MAX_POS = 0.04
 GRIPPER_MAX_SPEED = 0.03  # finger joint position units per second
+KEYBOARD_GRIPPER_COARSE_STEP = 0.001
+KEYBOARD_GRIPPER_STEP = 0.0002
+LEFT_FT_JOINT_NAME_CANDIDATES = ("fr3_left_ft", "fr3_gripper_left_ft")
+RIGHT_FT_JOINT_NAME_CANDIDATES = ("fr3_right_ft", "fr3_gripper_right_ft")
 LEFT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft/fr3/fr3_left_ft/fr3_gripper_left_ft"
 RIGHT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft/fr3/fr3_right_ft/fr3_gripper_right_ft"
 GRIPPER_CONTACT_FORCE_THRESHOLD = 2.0
@@ -124,11 +136,13 @@ FT_FORCE_ATTR_CANDIDATES = [
 
 
 def _ensure_isaac_imports() -> None:
-    global og, omni, Usd, UsdGeom, World, SingleArticulation, XFormPrim, ArticulationAction, create_prim, is_prim_path_valid
+    global og, omni, carb, omni_appwindow, Usd, UsdGeom, World, SingleArticulation, XFormPrim, ArticulationAction, create_prim, is_prim_path_valid
     if og is not None:
         return
     try:
+        import carb as _carb
         import omni as _omni
+        import omni.appwindow as _omni_appwindow
         import omni.graph.core as _og
         from pxr import Usd as _Usd
         from pxr import UsdGeom as _UsdGeom
@@ -145,7 +159,9 @@ def _ensure_isaac_imports() -> None:
             "not as a standalone `./python.sh script.py` process."
         ) from exc
 
+    carb = _carb
     omni = _omni
+    omni_appwindow = _omni_appwindow
     og = _og
     Usd = _Usd
     UsdGeom = _UsdGeom
@@ -588,13 +604,22 @@ class FrankaTeleopAttachRuntime:
         self._home_joint_targets_available = True
         self._stopped = False
         self._latest_gripper_width: Optional[float] = None
-        self._gripper_target_width: Optional[float] = None
+        self._gripper_target_width: Optional[float] = float(GRIPPER_MAX_POS)
         self._gripper_applied_width: Optional[float] = None
         self._gripper_joint_indices: Optional[Tuple[int, int]] = None
         self._warned_gripper_joint_missing = False
         self._ft_selected_attr: dict[str, str] = {}
         self._warned_ft_unavailable = False
         self._gripper_contact_latched = False
+        self._keyboard = None
+        self._keyboard_sub = None
+        self._input_iface = None
+        self._keyboard_target_position: Optional[np.ndarray] = None
+        self._ft_log_file = None
+        self._ft_log_writer = None
+        self._ft_log_path: Optional[Path] = None
+        self._ft_joint_force_indices: Optional[Tuple[int, int]] = None
+        self._warned_ft_joint_force_missing = False
 
     def _reset_cycle_state(self) -> None:
         self._reset_needed = True
@@ -604,7 +629,7 @@ class FrankaTeleopAttachRuntime:
         self._latest_target_pose = None
         self._warned_waiting_home_pose = False
         self._latest_gripper_width = None
-        self._gripper_target_width = None
+        self._gripper_target_width = float(GRIPPER_MAX_POS)
         self._gripper_applied_width = None
 
     def _reset_relative_reference_state(self) -> None:
@@ -622,6 +647,9 @@ class FrankaTeleopAttachRuntime:
         self._ft_selected_attr = {}
         self._warned_ft_unavailable = False
         self._gripper_contact_latched = False
+        self._keyboard_target_position = None
+        self._ft_joint_force_indices = None
+        self._warned_ft_joint_force_missing = False
 
     def start(self) -> None:
         stage = omni.usd.get_context().get_stage()
@@ -668,15 +696,10 @@ class FrankaTeleopAttachRuntime:
         self._physics_sub = omni.physx.get_physx_interface().subscribe_physics_step_events(
             self._on_physics_step
         )
+        self._setup_keyboard_debug()
+        self._open_ft_log()
 
         print("[INFO] Attach runtime started.", flush=True)
-        print(
-            f"[INFO] Reading teleop pose from OmniGraph attrs (position candidates={self._position_attr_paths}, "
-            f"orientation candidates={self._orientation_attr_paths}, "
-            f"pose candidates={self._pose_attr_paths}, "
-            f"gripper candidates={self._gripper_attr_paths})",
-            flush=True,
-        )
         if not ENABLE_TARGET_VISUALIZATION:
             print("[INFO] Target visualization is disabled. Driving FR3 directly from teleop commands.", flush=True)
 
@@ -685,6 +708,8 @@ class FrankaTeleopAttachRuntime:
         self._physics_sub = None
         self._update_sub = None
         self._timeline_sub = None
+        self._teardown_keyboard_debug()
+        self._close_ft_log()
         self._fr3 = None
         self._target = None
         self._controller = None
@@ -694,6 +719,147 @@ class FrankaTeleopAttachRuntime:
         self._disable_target_updates = not ENABLE_TARGET_VISUALIZATION
         self._reset_cycle_state()
         self._reset_relative_reference_state()
+
+    def _open_ft_log(self) -> None:
+        try:
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            self._ft_log_path = LOG_DIR / f"ft_log_{timestamp}.csv"
+            self._ft_log_file = self._ft_log_path.open("w", newline="", encoding="utf-8")
+            self._ft_log_writer = csv.writer(self._ft_log_file)
+            self._ft_log_writer.writerow(
+                [
+                    "timestamp_utc",
+                    "timestamp_unix_s",
+                    "left_ft_force",
+                    "right_ft_force",
+                    "max_ft_force",
+                ]
+            )
+            self._ft_log_file.flush()
+            print(f"[INFO] Logging FT data to {self._ft_log_path.resolve()}", flush=True)
+        except Exception as exc:
+            print(f"[WARN] Failed to open FT log CSV: {exc}", flush=True)
+            self._ft_log_file = None
+            self._ft_log_writer = None
+            self._ft_log_path = None
+
+    def _close_ft_log(self) -> None:
+        if self._ft_log_file is None:
+            self._ft_log_writer = None
+            self._ft_log_path = None
+            return
+        try:
+            self._ft_log_file.flush()
+            self._ft_log_file.close()
+        except Exception:
+            pass
+        self._ft_log_file = None
+        self._ft_log_writer = None
+        self._ft_log_path = None
+
+    def _log_ft_row(self, left: Optional[float], right: Optional[float], max_force: Optional[float]) -> None:
+        if self._ft_log_writer is None or self._ft_log_file is None:
+            return
+        now = datetime.now(timezone.utc)
+        try:
+            self._ft_log_writer.writerow(
+                [
+                    now.isoformat(),
+                    f"{now.timestamp():.6f}",
+                    "" if left is None else f"{left:.6f}",
+                    "" if right is None else f"{right:.6f}",
+                    "" if max_force is None else f"{max_force:.6f}",
+                ]
+            )
+            self._ft_log_file.flush()
+        except Exception:
+            pass
+
+    def _setup_keyboard_debug(self) -> None:
+        try:
+            app_window = omni_appwindow.get_default_app_window()
+            if app_window is None:
+                print("[WARN] No Isaac app window available for keyboard input.", flush=True)
+                return
+            self._keyboard = app_window.get_keyboard()
+            if self._keyboard is None:
+                print("[WARN] Isaac app window keyboard handle is unavailable.", flush=True)
+                return
+            self._input_iface = carb.input.acquire_input_interface()
+            self._keyboard_sub = self._input_iface.subscribe_to_keyboard_events(
+                self._keyboard,
+                self._on_keyboard_event,
+            )
+            print("[INFO] Keyboard debug subscription installed. Focus the Isaac Sim viewport/window to capture keys.", flush=True)
+        except Exception as exc:
+            print(f"[WARN] Failed to subscribe to keyboard events: {exc}", flush=True)
+            self._keyboard = None
+            self._keyboard_sub = None
+            self._input_iface = None
+
+    def _teardown_keyboard_debug(self) -> None:
+        if self._input_iface is not None and self._keyboard is not None and self._keyboard_sub is not None:
+            try:
+                self._input_iface.unsubscribe_to_keyboard_events(self._keyboard, self._keyboard_sub)
+            except Exception:
+                pass
+        self._keyboard = None
+        self._keyboard_sub = None
+        self._input_iface = None
+
+    def _on_keyboard_event(self, event: Any, *args: Any, **kwargs: Any) -> bool:
+        del args, kwargs
+        try:
+            if int(event.type) == int(carb.input.KeyboardEventType.KEY_PRESS):
+                key_name = getattr(event.input, "name", None)
+                if callable(key_name):
+                    key_name = key_name()
+                if not key_name:
+                    key_name = str(event.input)
+                normalized_key = str(key_name).upper()
+                if normalized_key.endswith("T"):
+                    self._queue_keyboard_target_from_prim()
+                elif normalized_key.endswith("O"):
+                    self._step_gripper_target(KEYBOARD_GRIPPER_COARSE_STEP)
+                elif normalized_key.endswith("P"):
+                    self._step_gripper_target(-KEYBOARD_GRIPPER_COARSE_STEP)
+                elif normalized_key.endswith("MINUS") or normalized_key.endswith("-"):
+                    self._step_gripper_target(KEYBOARD_GRIPPER_STEP)
+                elif normalized_key.endswith("EQUAL") or normalized_key.endswith("="):
+                    self._step_gripper_target(-KEYBOARD_GRIPPER_STEP)
+        except Exception as exc:
+            print(f"[WARN] Keyboard event handling failed: {exc}", flush=True)
+        return True
+
+    def _queue_keyboard_target_from_prim(self) -> None:
+        target_position, _ = _get_prim_world_pose(KEYBOARD_TARGET_PRIM_PATH)
+        if target_position is None:
+            print(
+                f"[WARN] Could not read keyboard target position from '{KEYBOARD_TARGET_PRIM_PATH}'.",
+                flush=True,
+            )
+            return
+        self._keyboard_target_position = np.asarray(target_position, dtype=np.float64)
+        print(
+            f"[INFO] Queued keyboard target move to {KEYBOARD_TARGET_PRIM_PATH} at "
+            f"{_fmt_seq(self._keyboard_target_position)}",
+            flush=True,
+        )
+
+    def _step_gripper_target(self, delta: float) -> None:
+        base_width = self._gripper_target_width
+        if base_width is None:
+            current_width = self._read_current_gripper_width()
+            base_width = current_width if current_width is not None else float(GRIPPER_MAX_POS)
+        self._gripper_target_width = float(
+            np.clip(float(base_width) + float(delta), GRIPPER_MIN_POS, GRIPPER_MAX_POS)
+        )
+        print(
+            f"[INFO] Gripper target width set to {self._gripper_target_width:.5f} "
+            f"(range {GRIPPER_MIN_POS:.5f}..{GRIPPER_MAX_POS:.5f})",
+            flush=True,
+        )
 
     def _stop_runtime_after_timeline_end(self) -> None:
         global _RUNTIME
@@ -921,6 +1087,35 @@ class FrankaTeleopAttachRuntime:
 
         return True
 
+    def _reanchor_relative_command(
+        self,
+        input_position: np.ndarray,
+        input_orientation: np.ndarray,
+        command_position: np.ndarray,
+        command_orientation: Optional[np.ndarray],
+    ) -> None:
+        self._input_ref_position = np.asarray(input_position, dtype=np.float64)
+        self._input_ref_orientation = _quat_normalize_wxyz(np.asarray(input_orientation, dtype=np.float64))
+        self._home_cmd_position = np.asarray(command_position, dtype=np.float64)
+        if command_orientation is None:
+            current_home = self._home_cmd_orientation
+            if current_home is None:
+                current_pose = self._get_home_pose_from_reference_prim()
+                command_orientation = current_pose[1] if current_pose is not None else np.asarray(
+                    [1.0, 0.0, 0.0, 0.0], dtype=np.float64
+                )
+            else:
+                command_orientation = current_home
+        self._home_cmd_orientation = _quat_normalize_wxyz(np.asarray(command_orientation, dtype=np.float64))
+        self._printed_initial_pose_snapshot = False
+        self._warned_waiting_home_pose = False
+        print(
+            "[INFO] Relative teleop reference re-anchored: "
+            f"input_ref_pos={_fmt_seq(self._input_ref_position)}, "
+            f"home_cmd_pos={_fmt_seq(self._home_cmd_position)}",
+            flush=True,
+        )
+
     def _read_target_pose_from_omnigraph(self) -> Optional[Tuple[list[float], list[float]]]:
         # OmniGraph data read happens here each step from the ROS2 Subscribe Pose node outputs.
         raw_position = None
@@ -1088,9 +1283,85 @@ class FrankaTeleopAttachRuntime:
                 continue
         return None
 
-    def _read_gripper_contact_force(self) -> Optional[float]:
-        left = self._read_ft_force_scalar(LEFT_FT_JOINT_PRIM_PATH)
-        right = self._read_ft_force_scalar(RIGHT_FT_JOINT_PRIM_PATH)
+    def _resolve_ft_joint_force_indices(self) -> Optional[Tuple[int, int]]:
+        if self._ft_joint_force_indices is not None:
+            return self._ft_joint_force_indices
+        if self._fr3 is None:
+            return None
+
+        candidate_name_lists = []
+        articulation_view = getattr(self._fr3, "_articulation_view", None)
+        for attr_name in ("joint_names", "dof_names", "body_names"):
+            names = getattr(self._fr3, attr_name, None)
+            if isinstance(names, Sequence):
+                candidate_name_lists.append(list(names))
+            if articulation_view is not None:
+                view_names = getattr(articulation_view, attr_name, None)
+                if isinstance(view_names, Sequence):
+                    candidate_name_lists.append(list(view_names))
+        metadata = getattr(articulation_view, "_metadata", None) if articulation_view is not None else None
+        if metadata is not None:
+            for attr_name in ("joint_names", "dof_names", "body_names"):
+                names = getattr(metadata, attr_name, None)
+                if isinstance(names, Sequence):
+                    candidate_name_lists.append(list(names))
+
+        for names in candidate_name_lists:
+            try:
+                left_idx = next(names.index(name) for name in LEFT_FT_JOINT_NAME_CANDIDATES if name in names)
+                right_idx = next(names.index(name) for name in RIGHT_FT_JOINT_NAME_CANDIDATES if name in names)
+                self._ft_joint_force_indices = (int(left_idx), int(right_idx))
+                return self._ft_joint_force_indices
+            except StopIteration:
+                continue
+
+        if not self._warned_ft_joint_force_missing:
+            print(
+                "[WARN] Could not resolve FT joint names for measured articulation forces; "
+                "falling back to configured prim paths.",
+                flush=True,
+            )
+            self._warned_ft_joint_force_missing = True
+        return None
+
+    def _read_measured_joint_force_scalar(self, joint_index: int) -> Optional[float]:
+        if self._fr3 is None:
+            return None
+        try:
+            measured = np.asarray(self._fr3.get_measured_joint_forces(), dtype=np.float64)
+        except Exception:
+            return None
+        if measured.size == 0:
+            return None
+
+        if measured.ndim == 3:
+            measured = measured[0]
+        if measured.ndim != 2:
+            return None
+        if joint_index < 0:
+            return None
+        if joint_index >= measured.shape[0]:
+            return None
+
+        wrench = np.asarray(measured[joint_index], dtype=np.float64).reshape(-1)
+        if wrench.size < 3:
+            return None
+        fz = float(wrench[2])
+        return fz if math.isfinite(fz) else None
+
+    def _read_gripper_contact_forces(self) -> Tuple[Optional[float], Optional[float], Optional[float]]:
+        left = None
+        right = None
+
+        ft_joint_indices = self._resolve_ft_joint_force_indices()
+        if ft_joint_indices is not None:
+            left = self._read_measured_joint_force_scalar(ft_joint_indices[0])
+            right = self._read_measured_joint_force_scalar(ft_joint_indices[1])
+
+        if left is None:
+            left = self._read_ft_force_scalar(LEFT_FT_JOINT_PRIM_PATH)
+        if right is None:
+            right = self._read_ft_force_scalar(RIGHT_FT_JOINT_PRIM_PATH)
         vals = [v for v in (left, right) if v is not None]
         if not vals:
             if not self._warned_ft_unavailable:
@@ -1099,8 +1370,9 @@ class FrankaTeleopAttachRuntime:
                     flush=True,
                 )
                 self._warned_ft_unavailable = True
-            return None
-        return max(vals)
+            return left, right, None
+        self._warned_ft_unavailable = False
+        return left, right, max(vals)
 
     def _read_current_gripper_width(self) -> Optional[float]:
         if self._fr3 is None:
@@ -1117,8 +1389,6 @@ class FrankaTeleopAttachRuntime:
             return None
 
     def _update_gripper_smooth(self, dt: float) -> None:
-        if self._latest_gripper_width is not None:
-            self._gripper_target_width = float(np.clip(self._latest_gripper_width, GRIPPER_MIN_POS, GRIPPER_MAX_POS))
         if self._gripper_target_width is None:
             return
 
@@ -1128,21 +1398,13 @@ class FrankaTeleopAttachRuntime:
                 current_width if current_width is not None else self._gripper_target_width
             )
 
-        contact_force = self._read_gripper_contact_force()
-        closing_requested = self._gripper_target_width < (self._gripper_applied_width - 1e-6)
+        left_force, right_force, max_force = self._read_gripper_contact_forces()
+        self._log_ft_row(left_force, right_force, max_force)
+
         opening_requested = self._gripper_target_width > (self._gripper_applied_width + 1e-6)
 
         if opening_requested:
             self._gripper_contact_latched = False
-        elif (
-            closing_requested
-            and contact_force is not None
-            and contact_force >= float(GRIPPER_CONTACT_FORCE_THRESHOLD)
-        ):
-            self._gripper_contact_latched = True
-
-        if self._gripper_contact_latched and closing_requested:
-            self._gripper_target_width = self._gripper_applied_width
 
         max_step = float(GRIPPER_MAX_SPEED) * float(max(dt, 1e-6))
         error = self._gripper_target_width - self._gripper_applied_width
@@ -1156,9 +1418,6 @@ class FrankaTeleopAttachRuntime:
         if not timeline.is_playing():
             return
         self._latest_target_pose = self._read_target_pose_from_omnigraph()
-        gripper_width = self._read_gripper_width_from_omnigraph()
-        if gripper_width is not None:
-            self._latest_gripper_width = gripper_width
 
     def _set_target_world_pose(self, position: Sequence[float], orientation_wxyz: Sequence[float]) -> None:
         if self._disable_target_updates or self._target is None:
@@ -1216,32 +1475,58 @@ class FrankaTeleopAttachRuntime:
 
         self._update_gripper_smooth(dt)
 
-        pose = self._latest_target_pose
-        if pose is None:
-            self._missing_pose_steps += 1
-            if not self._warned_waiting_for_pose:
-                print("[WARN] Waiting for first valid pose from OmniGraph ROS2 subscribe node.", flush=True)
-                self._warned_waiting_for_pose = True
-            return
-        self._missing_pose_steps = 0
-
-        target_position, target_orientation = pose
-        target_position_np = np.asarray(target_position, dtype=np.float64)
-        target_orientation_np = _quat_normalize_wxyz(np.asarray(target_orientation, dtype=np.float64))
-        if USE_RELATIVE_INPUT:
-            if not self._ensure_initial_relative_references(target_position_np, target_orientation_np):
+        keyboard_target = self._keyboard_target_position
+        if keyboard_target is not None:
+            self._keyboard_target_position = None
+            current_pose = self._get_home_pose_from_reference_prim()
+            target_position_np = np.asarray(keyboard_target, dtype=np.float64)
+            target_orientation_np = current_pose[1] if current_pose is not None else None
+            latest_pose = self._latest_target_pose
+            if USE_RELATIVE_INPUT and latest_pose is not None:
+                latest_input_position = np.asarray(latest_pose[0], dtype=np.float64)
+                latest_input_orientation = _quat_normalize_wxyz(np.asarray(latest_pose[1], dtype=np.float64))
+                self._reanchor_relative_command(
+                    input_position=latest_input_position,
+                    input_orientation=latest_input_orientation,
+                    command_position=target_position_np,
+                    command_orientation=target_orientation_np,
+                )
+        else:
+            pose = self._latest_target_pose
+            if pose is None:
+                self._missing_pose_steps += 1
+                if not self._warned_waiting_for_pose:
+                    print("[WARN] Waiting for first valid pose from OmniGraph ROS2 subscribe node.", flush=True)
+                    self._warned_waiting_for_pose = True
                 return
-            relative_cmd = self._to_relative_command(
-                target_position_np, target_orientation_np
+            self._missing_pose_steps = 0
+
+            target_position, target_orientation = pose
+            target_position_np = np.asarray(target_position, dtype=np.float64)
+            target_orientation_np = _quat_normalize_wxyz(np.asarray(target_orientation, dtype=np.float64))
+            if USE_RELATIVE_INPUT:
+                if not self._ensure_initial_relative_references(target_position_np, target_orientation_np):
+                    return
+                relative_cmd = self._to_relative_command(
+                    target_position_np, target_orientation_np
+                )
+                if relative_cmd is None:
+                    return
+                target_position_np, target_orientation_np = relative_cmd
+
+        if keyboard_target is None:
+            self._set_target_world_pose(target_position_np, target_orientation_np)
+            target_ori_arg = target_orientation_np if SEND_ORIENTATION_TARGET else None
+        else:
+            current_pose = self._get_home_pose_from_reference_prim()
+            vis_orientation = (
+                current_pose[1]
+                if current_pose is not None
+                else np.asarray([1.0, 0.0, 0.0, 0.0], dtype=np.float64)
             )
-            if relative_cmd is None:
-                return
-            target_position_np, target_orientation_np = relative_cmd
+            self._set_target_world_pose(target_position_np, vis_orientation)
+            target_ori_arg = None
 
-        # Keep the target Xform synced to incoming pose for debugging in the stage.
-        self._set_target_world_pose(target_position_np, target_orientation_np)
-
-        target_ori_arg = target_orientation_np if SEND_ORIENTATION_TARGET else None
         actions = self._controller.forward(
             target_end_effector_position=target_position_np,
             target_end_effector_orientation=target_ori_arg,
@@ -1250,6 +1535,45 @@ class FrankaTeleopAttachRuntime:
 
 
 _RUNTIME: Optional[FrankaTeleopAttachRuntime] = None
+
+
+def debug_ft_prims() -> None:
+    _ensure_isaac_imports()
+    stage = omni.usd.get_context().get_stage()
+    if stage is None:
+        print("[WARN] No USD stage is currently open in Isaac Sim.", flush=True)
+        return
+
+    for prim_path in (LEFT_FT_JOINT_PRIM_PATH, RIGHT_FT_JOINT_PRIM_PATH):
+        print(f"[INFO] Inspecting FT prim: {prim_path}", flush=True)
+        prim = stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.IsValid():
+            print("[WARN] Prim does not exist or is invalid.", flush=True)
+            continue
+
+        attr_names = sorted(attr.GetName() for attr in prim.GetAttributes())
+        print(f"[INFO] Attribute count: {len(attr_names)}", flush=True)
+        print(f"[INFO] Attributes: {attr_names}", flush=True)
+
+        candidate_names = list(dict.fromkeys(FT_FORCE_ATTR_CANDIDATES + attr_names))
+        for attr_name in candidate_names:
+            if not attr_name:
+                continue
+            try:
+                attr = prim.GetAttribute(attr_name)
+                if not attr or not attr.IsValid():
+                    continue
+                raw_value = attr.Get()
+                scalar = FrankaTeleopAttachRuntime._force_value_to_scalar(raw_value)
+                print(
+                    f"[INFO] {prim_path} :: {attr_name} -> raw={raw_value!r}, scalar={scalar}",
+                    flush=True,
+                )
+            except Exception as exc:
+                print(
+                    f"[WARN] {prim_path} :: {attr_name} read failed: {exc}",
+                    flush=True,
+                )
 
 
 def start() -> None:
