@@ -657,8 +657,8 @@ class FrankaTeleopAttachRuntime:
         self._ft_log_file = None
         self._ft_log_writer = None
         self._ft_log_path: Optional[Path] = None
-        self._ft_joint_force_indices: Optional[Tuple[int, int]] = None
-        self._ft_joint_force_names: Optional[Tuple[str, str]] = None
+        self._ft_link_ids: Optional[Tuple[int, int]] = None
+        self._ft_link_names: Optional[Tuple[str, str]] = None
         self._warned_ft_joint_force_missing = False
         self._printed_ft_joint_resolution = False
 
@@ -690,8 +690,8 @@ class FrankaTeleopAttachRuntime:
         self._gripper_contact_latched = False
         self._keyboard_target_position = None
         self._keyboard_target_orientation = None
-        self._ft_joint_force_indices = None
-        self._ft_joint_force_names = None
+        self._ft_link_ids = None
+        self._ft_link_names = None
         self._warned_ft_joint_force_missing = False
         self._printed_ft_joint_resolution = False
 
@@ -1470,58 +1470,47 @@ class FrankaTeleopAttachRuntime:
             return force_val if math.isfinite(force_val) else None
         return None
 
-    def _resolve_ft_joint_force_indices(self) -> Optional[Tuple[int, int]]:
-        if self._ft_joint_force_indices is not None:
-            return self._ft_joint_force_indices
+    def _resolve_ft_link_ids(self) -> Optional[Tuple[int, int]]:
+        if self._ft_link_ids is not None:
+            return self._ft_link_ids
         if self._fr3 is None:
             return None
 
-        candidate_name_lists = []
         articulation_view = getattr(self._fr3, "_articulation_view", None)
-        for attr_name in ("joint_names", "dof_names", "body_names"):
-            names = getattr(self._fr3, attr_name, None)
-            if isinstance(names, Sequence):
-                candidate_name_lists.append(list(names))
-            if articulation_view is not None:
-                view_names = getattr(articulation_view, attr_name, None)
-                if isinstance(view_names, Sequence):
-                    candidate_name_lists.append(list(view_names))
-        metadata = getattr(articulation_view, "_metadata", None) if articulation_view is not None else None
-        if metadata is not None:
-            for attr_name in ("joint_names", "dof_names", "body_names"):
-                names = getattr(metadata, attr_name, None)
-                if isinstance(names, Sequence):
-                    candidate_name_lists.append(list(names))
-
-        for names in candidate_name_lists:
-            try:
-                left_name = next(name for name in LEFT_FT_JOINT_NAME_CANDIDATES if name in names)
-                right_name = next(name for name in RIGHT_FT_JOINT_NAME_CANDIDATES if name in names)
-                left_idx = names.index(left_name)
-                right_idx = names.index(right_name)
-                self._ft_joint_force_indices = (int(left_idx), int(right_idx))
-                self._ft_joint_force_names = (str(left_name), str(right_name))
-                if not self._printed_ft_joint_resolution:
-                    print(
-                        "[INFO] Resolved FT joint indices for measured articulation forces: "
-                        f"left={left_name}@{left_idx}, right={right_name}@{right_idx}",
-                        flush=True,
-                    )
-                    self._printed_ft_joint_resolution = True
-                return self._ft_joint_force_indices
-            except StopIteration:
-                continue
+        if articulation_view is not None:
+            body_names = getattr(articulation_view, "body_names", None)
+            if isinstance(body_names, Sequence):
+                body_names = list(body_names)
+                try:
+                    left_name = next(name for name in LEFT_FT_JOINT_NAME_CANDIDATES if name in body_names)
+                    right_name = next(name for name in RIGHT_FT_JOINT_NAME_CANDIDATES if name in body_names)
+                    left_id = int(articulation_view.get_body_index(left_name))
+                    right_id = int(articulation_view.get_body_index(right_name))
+                    self._ft_link_ids = (left_id, right_id)
+                    self._ft_link_names = (str(left_name), str(right_name))
+                    if not self._printed_ft_joint_resolution:
+                        print(
+                            "[INFO] Resolved FT link ids for measured articulation forces: "
+                            f"left={left_name}@{left_id}, right={right_name}@{right_id}",
+                            flush=True,
+                        )
+                        self._printed_ft_joint_resolution = True
+                    return self._ft_link_ids
+                except StopIteration:
+                    pass
+                except Exception:
+                    pass
 
         if not self._warned_ft_joint_force_missing:
             print(
-                "[WARN] Could not resolve FT joint names for measured articulation forces; "
+                "[WARN] Could not resolve FT link ids for measured articulation forces; "
                 "falling back to configured prim paths.",
                 flush=True,
             )
             self._warned_ft_joint_force_missing = True
         return None
 
-    def _read_measured_joint_wrench(self, joint_index: int) -> Optional[np.ndarray]:
+    def _read_measured_link_wrench(self, link_id: int) -> Optional[np.ndarray]:
         if self._fr3 is None:
             return None
         try:
@@ -1535,12 +1524,12 @@ class FrankaTeleopAttachRuntime:
             measured = measured[0]
         if measured.ndim != 2:
             return None
-        if joint_index < 0:
+        if link_id < 0:
             return None
-        if joint_index >= measured.shape[0]:
+        if link_id >= measured.shape[0]:
             return None
 
-        wrench = np.asarray(measured[joint_index], dtype=np.float64).reshape(-1)
+        wrench = np.asarray(measured[link_id], dtype=np.float64).reshape(-1)
         if wrench.size < 6:
             return None
         return wrench[:6] if np.all(np.isfinite(wrench[:6])) else None
@@ -1571,19 +1560,19 @@ class FrankaTeleopAttachRuntime:
         right_wrench = None
         right_xyz = None
 
-        ft_joint_indices = self._resolve_ft_joint_force_indices()
-        if ft_joint_indices is not None:
-            left_joint_index = int(ft_joint_indices[0])
-            right_joint_index = int(ft_joint_indices[1])
-            if self._ft_joint_force_names is not None:
-                left_joint_name, right_joint_name = self._ft_joint_force_names
+        ft_link_ids = self._resolve_ft_link_ids()
+        if ft_link_ids is not None:
+            left_joint_index = int(ft_link_ids[0])
+            right_joint_index = int(ft_link_ids[1])
+            if self._ft_link_names is not None:
+                left_joint_name, right_joint_name = self._ft_link_names
 
-            left_wrench = self._read_measured_joint_wrench(left_joint_index)
+            left_wrench = self._read_measured_link_wrench(left_joint_index)
             if left_wrench is not None:
                 left_xyz = np.asarray(left_wrench[:3], dtype=np.float64)
                 left_source = "measured_articulation"
 
-            right_wrench = self._read_measured_joint_wrench(right_joint_index)
+            right_wrench = self._read_measured_link_wrench(right_joint_index)
             if right_wrench is not None:
                 right_xyz = np.asarray(right_wrench[:3], dtype=np.float64)
                 right_source = "measured_articulation"
