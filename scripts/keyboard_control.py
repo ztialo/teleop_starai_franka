@@ -34,7 +34,7 @@ is_prim_path_valid = None
 
 
 # Robot and target configuration.
-ROBOT_PRIM_PATH = "/Root/fr3_ft/fr3_ft_experimental"
+ROBOT_PRIM_PATH = "/Root/fr3_ft/fr3"
 TARGET_PRIM_PATH = "/World/rmp_target"
 TARGET_INITIAL_POSITION = [0.45, 0.0, 0.45]
 ENABLE_TARGET_VISUALIZATION = False
@@ -56,13 +56,13 @@ DIFF_IK_ORIENTATION_GAIN = 1.0
 # Relative teleop mapping:
 # commanded_pose = home_pose (+) delta(input_pose relative to first received pose)
 USE_RELATIVE_INPUT = True
-EE_HOME_REFERENCE_PRIM_PATH = "/Root/fr3_ft/fr3_ft_experimental/fr3_hand_tcp"
+EE_HOME_REFERENCE_PRIM_PATH = "/Root/fr3_ft/fr3/fr3_hand_tcp"
 EE_HOME_REFERENCE_PRIM_FALLBACK_PATHS = []
 DIFF_IK_EE_PRIM_CANDIDATES = [
     EE_HOME_REFERENCE_PRIM_PATH,
-    "/Root/fr3_ft/fr3_ft_experimental/fr3_link8",
-    "/Root/fr3_ft/fr3_ft_experimental/fr3_hand",
-    "/Root/fr3_ft/fr3_ft_experimental/fr3_link7",
+    "/Root/fr3_ft/fr3/fr3_link8",
+    "/Root/fr3_ft/fr3/fr3_hand",
+    "/Root/fr3_ft/fr3/fr3_link7",
 ]
 DIFF_IK_EE_BODY_CANDIDATES = [
     # "fr3_hand_tcp",
@@ -126,8 +126,8 @@ KEYBOARD_GRIPPER_COARSE_STEP = 0.001
 KEYBOARD_GRIPPER_STEP = 0.0002
 LEFT_FT_JOINT_NAME_CANDIDATES = ("fr3_left_ft", "fr3_gripper_left_ft")
 RIGHT_FT_JOINT_NAME_CANDIDATES = ("fr3_right_ft", "fr3_gripper_right_ft")
-LEFT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft/fr3_ft_experimental/fr3_left_ft/fr3_gripper_left_ft"
-RIGHT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft/fr3_ft_experimental/fr3_right_ft/fr3_gripper_right_ft"
+LEFT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft/fr3/fr3_left_ft/fr3_gripper_left_ft"
+RIGHT_FT_JOINT_PRIM_PATH = "/Root/fr3_ft/fr3/fr3_right_ft/fr3_gripper_right_ft"
 GRIPPER_CONTACT_FORCE_THRESHOLD = 2.0
 FT_FORCE_ATTR_CANDIDATES = [
     "body_incoming_joint_wrench_b",
