@@ -39,7 +39,8 @@ TARGET_PRIM_PATH = "/World/rmp_target"
 TARGET_INITIAL_POSITION = [0.45, 0.0, 0.45]
 ENABLE_TARGET_VISUALIZATION = False
 KEYBOARD_TARGET_PRIM_PATH = "/Root/target"
-REPO_ROOT = Path("/home/zdli/Projects/ros2_ws/src/teleop_starai_franka")
+# REPO_ROOT = Path("/home/zdli/Projects/ros2_ws/src/teleop_starai_franka")
+REPO_ROOT =  Path("/home/tactilemanipulationlab/lerobot/teleop_ws/src/teleop_starai_franka")
 LOG_DIR = REPO_ROOT / "log"
 
 # OmniGraph ROS subscribe node configuration.
