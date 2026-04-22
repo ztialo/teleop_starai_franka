@@ -895,35 +895,40 @@ class FrankaTeleopAttachRuntime:
                 if not key_name:
                     key_name = str(event.input)
                 normalized_key = str(key_name).upper()
-                if normalized_key.endswith("T"):
+                key_id = normalized_key
+                for delimiter in (".", ":", " "):
+                    if delimiter in key_id:
+                        key_id = key_id.split(delimiter)[-1]
+
+                if key_id == "T":
                     self._queue_keyboard_target_from_prim()
-                elif normalized_key.endswith("UP") or normalized_key.endswith("UP_ARROW"):
+                elif key_id in ("UP", "UP_ARROW"):
                     self._step_keyboard_position(np.asarray([0.0, 0.0, 1.0], dtype=np.float64) * KEYBOARD_POSITION_STEP_M)
-                elif normalized_key.endswith("DOWN") or normalized_key.endswith("DOWN_ARROW"):
+                elif key_id in ("DOWN", "DOWN_ARROW"):
                     self._step_keyboard_position(np.asarray([0.0, 0.0, -1.0], dtype=np.float64) * KEYBOARD_POSITION_STEP_M)
-                elif normalized_key.endswith("LEFT") or normalized_key.endswith("LEFT_ARROW"):
+                elif key_id in ("LEFT", "LEFT_ARROW"):
                     self._step_keyboard_position(np.asarray([0.0, 1.0, 0.0], dtype=np.float64) * KEYBOARD_POSITION_STEP_M)
-                elif normalized_key.endswith("RIGHT") or normalized_key.endswith("RIGHT_ARROW"):
+                elif key_id in ("RIGHT", "RIGHT_ARROW"):
                     self._step_keyboard_position(np.asarray([0.0, -1.0, 0.0], dtype=np.float64) * KEYBOARD_POSITION_STEP_M)
-                elif normalized_key.endswith("Q"):
+                elif key_id == "Q":
                     self._step_keyboard_orientation(np.asarray([1.0, 0.0, 0.0], dtype=np.float64), KEYBOARD_ROTATION_STEP_RAD)
-                elif normalized_key.endswith("W"):
+                elif key_id == "W":
                     self._step_keyboard_orientation(np.asarray([1.0, 0.0, 0.0], dtype=np.float64), -KEYBOARD_ROTATION_STEP_RAD)
-                elif normalized_key.endswith("A"):
+                elif key_id == "A":
                     self._step_keyboard_orientation(np.asarray([0.0, 1.0, 0.0], dtype=np.float64), KEYBOARD_ROTATION_STEP_RAD)
-                elif normalized_key.endswith("S"):
+                elif key_id == "S":
                     self._step_keyboard_orientation(np.asarray([0.0, 1.0, 0.0], dtype=np.float64), -KEYBOARD_ROTATION_STEP_RAD)
-                elif normalized_key.endswith("Z"):
+                elif key_id == "Z":
                     self._step_keyboard_orientation(np.asarray([0.0, 0.0, 1.0], dtype=np.float64), KEYBOARD_ROTATION_STEP_RAD)
-                elif normalized_key.endswith("X"):
+                elif key_id == "X":
                     self._step_keyboard_orientation(np.asarray([0.0, 0.0, 1.0], dtype=np.float64), -KEYBOARD_ROTATION_STEP_RAD)
-                elif normalized_key.endswith("O"):
+                elif key_id == "O":
                     self._step_gripper_target(KEYBOARD_GRIPPER_COARSE_STEP)
-                elif normalized_key.endswith("P"):
+                elif key_id == "P":
                     self._step_gripper_target(-KEYBOARD_GRIPPER_COARSE_STEP)
-                elif normalized_key.endswith("MINUS") or normalized_key.endswith("-"):
+                elif key_id in ("MINUS", "-"):
                     self._step_gripper_target(KEYBOARD_GRIPPER_STEP)
-                elif normalized_key.endswith("EQUAL") or normalized_key.endswith("="):
+                elif key_id in ("EQUAL", "="):
                     self._step_gripper_target(-KEYBOARD_GRIPPER_STEP)
         except Exception as exc:
             print(f"[WARN] Keyboard event handling failed: {exc}", flush=True)
