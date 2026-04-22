@@ -1491,7 +1491,8 @@ class FrankaTeleopAttachRuntime:
                     if not self._printed_ft_joint_resolution:
                         print(
                             "[INFO] Resolved FT link ids for measured articulation forces: "
-                            f"left={left_name}@{left_id}, right={right_name}@{right_id}",
+                            f"left_joint_index={left_id} ({left_name}), "
+                            f"right_joint_index={right_id} ({right_name})",
                             flush=True,
                         )
                         self._printed_ft_joint_resolution = True
