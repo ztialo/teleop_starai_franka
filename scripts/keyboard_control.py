@@ -11,6 +11,8 @@ LOG = True
 
 import csv
 import math
+import time
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 import uuid
@@ -31,6 +33,22 @@ XFormPrim = None
 ArticulationAction = None
 create_prim = None
 is_prim_path_valid = None
+
+# plot configure
+FT_AXIS_TO_INDEX = {
+    "fx": 0,
+    "fy": 1,
+    "fz": 2,
+    "tx": 3,
+    "ty": 4,
+    "tz": 5,
+}
+LIVE_FT_PLOT_AXES = ("tz", "tx", "fz")  # Set to one or more of: fx, fy, fz, tx, ty, tz
+LIVE_FT_PLOT_AXIS = None  # Legacy single-axis fallback
+LIVE_FT_PLOT_UPDATE_HZ = 8.0
+LIVE_FT_PLOT_WINDOW_SECONDS = 20.0
+LIVE_FT_FORCE_Y_LIMIT = 20.0
+LIVE_FT_TORQUE_Y_LIMIT = 20.0
 
 
 # Robot and target configuration.
@@ -662,6 +680,18 @@ class FrankaTeleopAttachRuntime:
         self._ft_link_names: Optional[Tuple[str, str]] = None
         self._warned_ft_joint_force_missing = False
         self._printed_ft_joint_resolution = False
+        self._live_plot_enabled = False
+        self._live_plot_axes: tuple[str, ...] = tuple()
+        self._live_plot_axis_indices: dict[str, int] = {}
+        self._live_plot_start_s: Optional[float] = None
+        self._live_plot_last_draw_s = 0.0
+        self._live_plot_times: deque[float] = deque()
+        self._live_plot_left_values: dict[str, deque[float]] = {}
+        self._live_plot_right_values: dict[str, deque[float]] = {}
+        self._live_plot_plt = None
+        self._live_plot_fig = None
+        self._live_plot_axes_by_name: dict[str, Any] = {}
+        self._live_plot_lines: dict[str, tuple[Any, Any]] = {}
 
     def _reset_cycle_state(self) -> None:
         self._reset_needed = True
@@ -743,6 +773,7 @@ class FrankaTeleopAttachRuntime:
         )
         self._setup_keyboard_debug()
         self._open_ft_log()
+        self._setup_live_ft_plot()
 
         print("[INFO] Attach runtime started.", flush=True)
         if not ENABLE_TARGET_VISUALIZATION:
@@ -755,6 +786,7 @@ class FrankaTeleopAttachRuntime:
         self._timeline_sub = None
         self._teardown_keyboard_debug()
         self._close_ft_log()
+        self._teardown_live_ft_plot()
         self._fr3 = None
         self._target = None
         self._controller = None
@@ -817,6 +849,188 @@ class FrankaTeleopAttachRuntime:
         self._ft_log_file = None
         self._ft_log_writer = None
         self._ft_log_path = None
+
+    def _setup_live_ft_plot(self) -> None:
+        raw_axes = LIVE_FT_PLOT_AXES
+        if raw_axes is None:
+            raw_axes = LIVE_FT_PLOT_AXIS
+
+        if raw_axes is None:
+            return
+
+        if isinstance(raw_axes, str):
+            configured_axes = [raw_axes]
+        elif isinstance(raw_axes, Sequence):
+            configured_axes = [str(axis) for axis in raw_axes]
+        else:
+            print(
+                "[WARN] LIVE_FT_PLOT_AXES must be a string or sequence of strings.",
+                flush=True,
+            )
+            return
+
+        axes: list[str] = []
+        invalid_axes: list[str] = []
+        seen: set[str] = set()
+        for axis in configured_axes:
+            normalized = str(axis).strip().lower()
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            if normalized not in FT_AXIS_TO_INDEX:
+                invalid_axes.append(normalized)
+                continue
+            axes.append(normalized)
+
+        if invalid_axes:
+            print(
+                f"[WARN] Ignoring invalid LIVE_FT plot axis values: {invalid_axes}. "
+                f"Valid choices are {tuple(FT_AXIS_TO_INDEX.keys())}.",
+                flush=True,
+            )
+
+        if not axes:
+            return
+
+        try:
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            print(f"[WARN] Could not import matplotlib for live FT plot: {exc}", flush=True)
+            return
+
+        try:
+            plt.ion()
+            fig, axs = plt.subplots(len(axes), 1, num="Live FT", sharex=True)
+            ax_list = list(np.atleast_1d(axs).reshape(-1))
+            axis_to_ax: dict[str, Any] = {}
+            axis_to_lines: dict[str, tuple[Any, Any]] = {}
+            for axis, ax in zip(axes, ax_list):
+                unit = "N" if axis.startswith("f") else "N*m"
+                (left_line,) = ax.plot([], [], label=f"left_{axis}", linewidth=1.2)
+                (right_line,) = ax.plot([], [], label=f"right_{axis}", linewidth=1.2)
+                ax.set_ylabel(f"{axis} [{unit}]")
+                if axis.startswith("f"):
+                    ax.set_ylim(-float(LIVE_FT_FORCE_Y_LIMIT), float(LIVE_FT_FORCE_Y_LIMIT))
+                elif axis.startswith("t"):
+                    ax.set_ylim(-float(LIVE_FT_TORQUE_Y_LIMIT), float(LIVE_FT_TORQUE_Y_LIMIT))
+                ax.grid(True, alpha=0.3)
+                ax.legend(loc="best")
+                axis_to_ax[axis] = ax
+                axis_to_lines[axis] = (left_line, right_line)
+            if ax_list:
+                ax_list[-1].set_xlabel("time [s] from plot start")
+            fig.tight_layout()
+        except Exception as exc:
+            print(f"[WARN] Failed to initialize live FT plot window: {exc}", flush=True)
+            return
+
+        self._live_plot_enabled = True
+        self._live_plot_axes = tuple(axes)
+        self._live_plot_axis_indices = {axis: int(FT_AXIS_TO_INDEX[axis]) for axis in self._live_plot_axes}
+        self._live_plot_start_s = None
+        self._live_plot_last_draw_s = 0.0
+        self._live_plot_times.clear()
+        self._live_plot_left_values = {axis: deque() for axis in self._live_plot_axes}
+        self._live_plot_right_values = {axis: deque() for axis in self._live_plot_axes}
+        self._live_plot_plt = plt
+        self._live_plot_fig = fig
+        self._live_plot_axes_by_name = axis_to_ax
+        self._live_plot_lines = axis_to_lines
+        print(f"[INFO] Live FT plot enabled for axes: {list(self._live_plot_axes)}", flush=True)
+
+    def _teardown_live_ft_plot(self) -> None:
+        if self._live_plot_plt is not None and self._live_plot_fig is not None:
+            try:
+                self._live_plot_plt.close(self._live_plot_fig)
+            except Exception:
+                pass
+        self._live_plot_enabled = False
+        self._live_plot_axes = tuple()
+        self._live_plot_axis_indices = {}
+        self._live_plot_start_s = None
+        self._live_plot_last_draw_s = 0.0
+        self._live_plot_times.clear()
+        self._live_plot_left_values = {}
+        self._live_plot_right_values = {}
+        self._live_plot_plt = None
+        self._live_plot_fig = None
+        self._live_plot_axes_by_name = {}
+        self._live_plot_lines = {}
+
+    def _update_live_ft_plot(
+        self,
+        left_wrench: Optional[np.ndarray],
+        right_wrench: Optional[np.ndarray],
+    ) -> None:
+        if not self._live_plot_enabled:
+            return
+        if not self._live_plot_axes:
+            return
+        if self._live_plot_plt is None or self._live_plot_fig is None:
+            return
+        if not self._live_plot_axes_by_name or not self._live_plot_lines:
+            return
+
+        now_s = time.monotonic()
+        if self._live_plot_start_s is None:
+            self._live_plot_start_s = now_s
+        t_rel = float(now_s - self._live_plot_start_s)
+
+        def _extract_axis_value(wrench: Optional[np.ndarray], axis_index: int) -> float:
+            if wrench is None:
+                return float("nan")
+            arr = np.asarray(wrench, dtype=np.float64).reshape(-1)
+            if arr.size <= axis_index:
+                return float("nan")
+            value = float(arr[axis_index])
+            return value if math.isfinite(value) else float("nan")
+
+        self._live_plot_times.append(t_rel)
+        for axis in self._live_plot_axes:
+            axis_index = self._live_plot_axis_indices.get(axis)
+            if axis_index is None:
+                continue
+            self._live_plot_left_values[axis].append(_extract_axis_value(left_wrench, axis_index))
+            self._live_plot_right_values[axis].append(_extract_axis_value(right_wrench, axis_index))
+
+        window_s = float(LIVE_FT_PLOT_WINDOW_SECONDS)
+        if window_s > 0.0:
+            while self._live_plot_times and (t_rel - self._live_plot_times[0]) > window_s:
+                self._live_plot_times.popleft()
+                for axis in self._live_plot_axes:
+                    if self._live_plot_left_values[axis]:
+                        self._live_plot_left_values[axis].popleft()
+                    if self._live_plot_right_values[axis]:
+                        self._live_plot_right_values[axis].popleft()
+
+        update_hz = float(max(LIVE_FT_PLOT_UPDATE_HZ, 0.5))
+        min_period = 1.0 / update_hz
+        if (now_s - self._live_plot_last_draw_s) < min_period:
+            return
+        self._live_plot_last_draw_s = now_s
+
+        try:
+            times = list(self._live_plot_times)
+            for axis in self._live_plot_axes:
+                left_line, right_line = self._live_plot_lines[axis]
+                ax_obj = self._live_plot_axes_by_name[axis]
+                left_line.set_data(times, list(self._live_plot_left_values[axis]))
+                right_line.set_data(times, list(self._live_plot_right_values[axis]))
+                ax_obj.relim()
+                ax_obj.autoscale_view()
+                if axis.startswith("f"):
+                    ax_obj.set_ylim(-float(LIVE_FT_FORCE_Y_LIMIT), float(LIVE_FT_FORCE_Y_LIMIT))
+                elif axis.startswith("t"):
+                    ax_obj.set_ylim(-float(LIVE_FT_TORQUE_Y_LIMIT), float(LIVE_FT_TORQUE_Y_LIMIT))
+                if window_s > 0.0:
+                    xmin = max(0.0, t_rel - window_s)
+                    xmax = max(t_rel, xmin + 1e-3)
+                    ax_obj.set_xlim(xmin, xmax)
+            self._live_plot_fig.canvas.draw_idle()
+            self._live_plot_plt.pause(0.001)
+        except Exception as exc:
+            print(f"[WARN] Live FT plot update failed; disabling plot window: {exc}", flush=True)
+            self._teardown_live_ft_plot()
 
     def _log_ft_row(
         self,
@@ -1665,6 +1879,7 @@ class FrankaTeleopAttachRuntime:
             right_wrench,
             max_force,
         )
+        self._update_live_ft_plot(left_wrench, right_wrench)
 
         opening_requested = self._gripper_target_width > (self._gripper_applied_width + 1e-6)
 
