@@ -32,4 +32,18 @@ Follow the [tutorial](https://wiki.seeedstudio.com/lerobot_starai_arm/) on setti
 ```
   python3 scripts/franky_controller.py
 ```
+
+## CoinFT
+### Updates:
+Fixed CoinFT frame definition. Created fingertip xforms offset from finger xform, CoinFT sensor xform shares the same origin as the fingertip xform. Then fixed joints are created between finger tip and CoinFT sensor. 
+
+### TODO:
+Left and right CoinFT values are opposite, so be sure to run the test again and change the sign of the negative sensor value.
+
+### Usage:
+1. First launch Isaac Sim
+2. Open test scene from `usd/franka_ft_scene.usd`
+3. In Isaac Sim, click on Windows -> script editor -> file -> open: `scripts/keyboard_control.py`
+4. Start Simulation
+5. Run script
   
