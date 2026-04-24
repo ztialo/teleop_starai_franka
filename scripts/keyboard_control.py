@@ -43,12 +43,12 @@ FT_AXIS_TO_INDEX = {
     "ty": 4,
     "tz": 5,
 }
-LIVE_FT_PLOT_AXES = ("tz", "tx", "fz")  # Set to one or more of: fx, fy, fz, tx, ty, tz
+LIVE_FT_PLOT_AXES = ("tz", "tx", "ty")  # Set to one or more of: fx, fy, fz, tx, ty, tz
 LIVE_FT_PLOT_AXIS = None  # Legacy single-axis fallback
 LIVE_FT_PLOT_UPDATE_HZ = 8.0
 LIVE_FT_PLOT_WINDOW_SECONDS = 20.0
 LIVE_FT_FORCE_Y_LIMIT = 20.0
-LIVE_FT_TORQUE_Y_LIMIT = 20.0
+LIVE_FT_TORQUE_Y_LIMIT = 0.5
 
 
 # Robot and target configuration.
@@ -93,6 +93,8 @@ ARM_JOINT_NAME_CANDIDATES = tuple(f"fr3_joint{i}" for i in range(1, 8))
 POSITION_DELTA_SCALE = 3.0
 KEYBOARD_POSITION_STEP_M = 0.01
 KEYBOARD_ROTATION_STEP_RAD = math.radians(5.0)
+KEYBOARD_FORWARD_KEYS = ("PERIOD", "DOT", "GREATER", "GREATERTHAN", ">")
+KEYBOARD_BACKWARD_KEYS = ("COMMA", "LESS", "LESSTHAN", "<")
 TRANSLATION_MAPPING_MODE = "world_delta"  # "world_delta" (default) or "local_delta"
 # Orientation mapping options:
 # 1) delta_q = q_current * conj(q_ref), cmd_q = delta_q * q_home
@@ -1124,6 +1126,10 @@ class FrankaTeleopAttachRuntime:
                     self._step_keyboard_position(np.asarray([0.0, 1.0, 0.0], dtype=np.float64) * KEYBOARD_POSITION_STEP_M)
                 elif key_id in ("RIGHT", "RIGHT_ARROW"):
                     self._step_keyboard_position(np.asarray([0.0, -1.0, 0.0], dtype=np.float64) * KEYBOARD_POSITION_STEP_M)
+                elif key_id in KEYBOARD_FORWARD_KEYS:
+                    self._step_keyboard_position(np.asarray([1.0, 0.0, 0.0], dtype=np.float64) * KEYBOARD_POSITION_STEP_M)
+                elif key_id in KEYBOARD_BACKWARD_KEYS:
+                    self._step_keyboard_position(np.asarray([-1.0, 0.0, 0.0], dtype=np.float64) * KEYBOARD_POSITION_STEP_M)
                 elif key_id == "Q":
                     self._step_keyboard_orientation(np.asarray([1.0, 0.0, 0.0], dtype=np.float64), KEYBOARD_ROTATION_STEP_RAD)
                 elif key_id == "W":
